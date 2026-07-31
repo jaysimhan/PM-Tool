@@ -126,63 +126,10 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                                     )}
                                 </>
                             ) : (
-                                <>
-                                    <div className="px-4 py-2 text-sm font-semibold text-gray-500">Recents</div>
-                                    
-                                    {/* Recent Item 1 */}
-                                    <button onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
-                                        <div className="flex items-center gap-4">
-                                            <div className="w-8 h-8 rounded bg-yellow-100 flex items-center justify-center text-yellow-700 font-bold text-lg">N</div>
-                                            <div>
-                                                <div className="text-sm text-gray-900 font-medium">test</div>
-                                                <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
-                                                    <div className="w-2 h-2 rounded-full bg-gray-300"></div>
-                                                    PR Calendar - All Geos
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </button>
-
-                                    {/* Recent Item 2 */}
-                                    <button onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
-                                        <div className="flex items-center gap-4">
-                                            <div className="w-8 h-8 rounded bg-pink-100 flex items-center justify-center text-pink-600">
-                                                <ClipboardList className="w-5 h-5" />
-                                            </div>
-                                            <div className="text-sm text-gray-900 font-medium">Creative requests</div>
-                                        </div>
-                                    </button>
-
-                                    {/* Recent Item 3 */}
-                                    <button onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
-                                        <div className="flex items-center gap-4">
-                                            <div className="w-8 h-8 rounded bg-gray-200 flex items-center justify-center text-gray-700">
-                                                <Triangle className="w-5 h-5" />
-                                            </div>
-                                            <div className="text-sm text-gray-900 font-medium">Video Calendar - All Geos</div>
-                                        </div>
-                                    </button>
-                                </>
+                                <div className="px-4 py-8 text-sm text-gray-500 text-center">
+                                    Type to search for tasks, projects, and people...
+                                </div>
                             )}
-                        </div>
-
-                        {/* Saved Searches Section */}
-                        <div className="py-3 px-4 border-t border-gray-100">
-                            <div className="text-sm font-semibold text-gray-500 mb-3">Saved searches</div>
-                            <div className="flex flex-wrap gap-2">
-                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
-                                    <CheckCircle2 className="w-4 h-4" /> Tasks I've created
-                                </button>
-                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
-                                    <CheckCircle2 className="w-4 h-4" /> Tasks I've assigned to others
-                                </button>
-                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
-                                    <CheckCircle2 className="w-4 h-4" /> Recently completed tasks
-                                </button>
-                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
-                                    <Trash2 className="w-4 h-4" /> Deleted
-                                </button>
-                            </div>
                         </div>
 
                     </div>

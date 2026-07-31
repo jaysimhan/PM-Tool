@@ -106,9 +106,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                     tags: (t.task_tags || []).map((tt: any) => tt.tags).filter(Boolean),
                     isSubtask: t.is_subtask,
                     createdDate: t.created_at,
-                    subtaskIds: [],
-                    dependencyIds: [],
-                    linkedTaskIds: []
+                    subtaskIds: t.subtask_ids || [],
+                    dependencyIds: t.dependency_ids || [],
+                    linkedTaskIds: t.linked_task_ids || [],
+                    checklist: t.checklist || []
                 })) as unknown as Task[];
                 setTasks(transformedTasks);
             }
@@ -155,9 +156,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 tags: (t.task_tags || []).map((tt: any) => tt.tags).filter(Boolean),
                 isSubtask: t.is_subtask,
                 createdDate: t.created_at,
-                subtaskIds: [],
-                dependencyIds: [],
-                linkedTaskIds: []
+                subtaskIds: t.subtask_ids || [],
+                dependencyIds: t.dependency_ids || [],
+                linkedTaskIds: t.linked_task_ids || [],
+                checklist: t.checklist || []
             })) as unknown as Task[];
             setTasks(transformedTasks);
         }

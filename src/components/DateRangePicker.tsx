@@ -325,10 +325,12 @@ export function DateRangePicker({ startDate, dueDate, onChange, onClose, align =
                             </svg>
                         </button>
                         {/* Tooltip */}
-                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 hidden group-hover:flex items-center justify-center bg-[#2a2a2a] text-white text-[13px] font-medium px-3 py-1.5 rounded-md shadow-sm whitespace-nowrap z-50">
-                            Set to repeat
-                            <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-transparent border-t-[#2a2a2a]"></div>
-                        </div>
+                        {!showRepeat && (
+                            <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 hidden group-hover:flex items-center justify-center bg-[#2a2a2a] text-white text-[13px] font-medium px-3 py-1.5 rounded-md shadow-sm whitespace-nowrap z-50 pointer-events-none">
+                                Set to repeat
+                                <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-transparent border-t-[#2a2a2a]"></div>
+                            </div>
+                        )}
                     </div>
                 </div>
                 <button onClick={handleClear} className="text-[15px] font-semibold text-gray-600 hover:text-gray-900 px-2">

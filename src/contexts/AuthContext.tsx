@@ -8,8 +8,10 @@ interface AuthContextType {
     user: SupabaseUser | null;
     profile: User | null;
     loading: boolean;
+    mfaRequired: boolean;
     signOut: () => Promise<void>;
     updateProfile: (updates: Partial<User>) => Promise<void>;
+    checkMfa: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -19,30 +21,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [user, setUser] = useState<SupabaseUser | null>(null);
     const [profile, setProfile] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
+    const [mfaRequired, setMfaRequired] = useState(false);
 
     useEffect(() => {
         // Get initial session
-        supabase.auth.getSession().then(({ data: { session } }) => {
+        supabase.auth.getSession().then(async ({ data: { session } }) => {
             setSession(session);
             setUser(session?.user ?? null);
-            if (session?.user) fetchProfile(session.user.id);
+            if (session?.user) {
+                await checkMfa();
+                fetchProfile(session.user.id);
+            }
             else setLoading(false);
         });
 
         // Listen for auth changes
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
             setSession(session);
             setUser(session?.user ?? null);
             if (session?.user) {
+                await checkMfa();
                 fetchProfile(session.user.id);
             } else {
                 setProfile(null);
+                setMfaRequired(false);
                 setLoading(false);
             }
         });
 
         return () => subscription.unsubscribe();
     }, []);
+
+    const checkMfa = async () => {
+        try {
+            const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+            if (!error && data) {
+                setMfaRequired(data.nextLevel === 'aal2' && data.currentLevel === 'aal1');
+            }
+        } catch (err) {
+            console.error('Error checking MFA:', err);
+        }
+    };
 
     const fetchProfile = async (userId: string) => {
         try {
@@ -108,7 +127,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     return (
-        <AuthContext.Provider value={{ session, user, profile, loading, signOut, updateProfile }}>
+        <AuthContext.Provider value={{ session, user, profile, loading, mfaRequired, signOut, updateProfile, checkMfa }}>
             {children}
         </AuthContext.Provider>
     );

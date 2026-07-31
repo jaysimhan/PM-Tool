@@ -338,6 +338,22 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
         handleStatusChange(next);
     };
 
+    const updateChecklistInDB = async (newList: typeof localChecklist) => {
+        setLocalChecklist(newList);
+        if (task) {
+            await supabase.from('tasks').update({ checklist: newList }).eq('id', task.id);
+            refreshTasks();
+        }
+    };
+
+    const updateSubtaskOrderInDB = async (newIds: string[]) => {
+        setLocalSubtaskIds(newIds);
+        if (task) {
+            await supabase.from('tasks').update({ subtask_ids: newIds }).eq('id', task.id);
+            refreshTasks();
+        }
+    };
+
     const handleCommentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
         const val = e.target.value;
         setNewComment(val);
@@ -1401,7 +1417,25 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                         <div className="flex items-center justify-between mb-2 -mx-6 px-6 group/header">
                                             <div className="flex items-center gap-3">
                                                 <ChevronDown className="w-4 h-4 text-gray-500 bg-gray-100 rounded" />
-                                                <h3 className="text-[15px] font-bold text-gray-900">Subtasks</h3>
+                                                {isEditingSubtasksTitle ? (
+                                                    <input 
+                                                        autoFocus
+                                                        className="text-[15px] font-bold text-gray-900 bg-transparent border-0 p-0 focus:ring-0" 
+                                                        value={subtasksTitle} 
+                                                        onChange={e => setSubtasksTitle(e.target.value)} 
+                                                        onBlur={() => setIsEditingSubtasksTitle(false)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') {
+                                                                e.preventDefault();
+                                                                setIsEditingSubtasksTitle(false);
+                                                            }
+                                                        }}
+                                                    />
+                                                ) : (
+                                                    <h3 className="text-[15px] font-bold text-gray-900 cursor-text" onClick={() => setIsEditingSubtasksTitle(true)}>
+                                                        {subtasksTitle || 'Subtasks'}
+                                                    </h3>
+                                                )}
                                                 <span className="bg-gray-200/70 text-gray-600 text-xs px-2 py-0.5 rounded font-medium">0 / {localSubtaskIds.length}</span>
                                             </div>
                                             <div className="flex items-center opacity-0 group-hover/header:opacity-100 transition-opacity">
@@ -1469,7 +1503,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                             ids.splice(fromIdx, 1);
                                                             ids.splice(toIdx, 0, fromId);
                                                             task.subtaskIds = ids;
-                                                            setLocalSubtaskIds(ids);
+                                                            updateSubtaskOrderInDB(ids);
                                                             setDragOverSubtaskId(null);
                                                             dragSubtaskId.current = null;
                                                         }}
@@ -1671,7 +1705,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                     </button>
                                                     <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-xl shadow-xl z-[60] overflow-hidden font-sans opacity-0 invisible group-hover/menu:opacity-100 group-hover/menu:visible transition-all">
                                                         <div className="py-1">
-                                                            <button onClick={() => setLocalChecklist([])} className="w-full text-left px-4 py-2 hover:bg-red-50 flex items-center gap-2 text-sm text-red-600">
+                                                            <button onClick={() => updateChecklistInDB([])} className="w-full text-left px-4 py-2 hover:bg-red-50 flex items-center gap-2 text-sm text-red-600">
                                                                 <Trash2 className="w-4 h-4" /> Delete checklist
                                                             </button>
                                                         </div>

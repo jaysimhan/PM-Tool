@@ -2,12 +2,16 @@ import React, { useState } from 'react';
 import { User } from '../types/types';
 import { workCategories, clients, tasks } from '../data/mockData';
 import { FileText, Send, X, Link as LinkIcon, Settings, Copy, Eye } from 'lucide-react';
+import { supabase } from '../lib/supabaseClient';
+import { useData } from '../contexts/DataContext';
 
 interface Props {
     currentUser: User;
 }
 
 export default function RequestForm({ currentUser }: Props) {
+    const { refreshTasks } = useData();
+
     const [formData, setFormData] = useState({
         title: '',
         description: '',
@@ -27,25 +31,49 @@ export default function RequestForm({ currentUser }: Props) {
 
     const isAdmin = currentUser.role === 'super_admin' || currentUser.role === 'admin';
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        console.log('Submitting request:', formData);
-        setShowSuccess(true);
+        setIsSubmitting(true);
+        
+        try {
+            const { error } = await supabase.from('tasks').insert({
+                title: formData.title,
+                description: formData.description,
+                client_id: formData.clientId || null,
+                priority: formData.priority,
+                due_date: formData.dueDate || null,
+                estimated_hours: formData.estimatedHours ? parseFloat(formData.estimatedHours) : null,
+                requester_id: currentUser.id,
+                status: 'new_request'
+            });
 
-        // Reset form
-        setFormData({
-            title: '',
-            description: '',
-            categoryId: '',
-            clientId: '',
-            department: '',
-            priority: 'normal',
-            dueDate: '',
-            estimatedHours: '',
-            tags: ''
-        });
+            if (error) throw error;
+            
+            await refreshTasks();
+            setShowSuccess(true);
+            
+            // Reset form
+            setFormData({
+                title: '',
+                description: '',
+                categoryId: '',
+                clientId: '',
+                department: '',
+                priority: 'normal',
+                dueDate: '',
+                estimatedHours: '',
+                tags: ''
+            });
 
-        setTimeout(() => setShowSuccess(false), 3000);
+            setTimeout(() => setShowSuccess(false), 3000);
+        } catch (error) {
+            console.error('Error submitting request:', error);
+            alert('Failed to submit request.');
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -318,10 +346,20 @@ export default function RequestForm({ currentUser }: Props) {
                         </button>
                         <button
                             type="submit"
-                            className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
+                            disabled={isSubmitting}
+                            className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50"
                         >
-                            <Send className="w-4 h-4" />
-                            Submit Request
+                            {isSubmitting ? (
+                                <>
+                                    <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                                    Submitting...
+                                </>
+                            ) : (
+                                <>
+                                    <Send className="w-4 h-4" />
+                                    Submit Request
+                                </>
+                            )}
                         </button>
                     </div>
                 )}

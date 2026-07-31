@@ -39,7 +39,7 @@ export default function Component() {
         setIsMac(navigator.platform.toUpperCase().indexOf('MAC') >= 0);
     }, []);
     const { loading: dataLoading } = useData();
-    const { session, profile: currentUser, loading: authLoading, mfaRequired, signOut } = useAuth();
+    const { session, profile: currentUser, loading: authLoading, signOut } = useAuth();
     
     const navigate = useNavigate();
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -112,10 +112,10 @@ export default function Component() {
 
     return (
         <Routes>
-            <Route path="/login" element={(!session || mfaRequired) ? <Login /> : <Navigate to="/" />} />
+            <Route path="/login" element={!session ? <Login /> : <Navigate to="/" />} />
             <Route path="/update-password" element={session ? <CreatePassword /> : <Navigate to="/login" />} />
             <Route path="*" element={
-                (!session || mfaRequired) ? (
+                !session ? (
                     <Navigate to="/login" />
                 ) : !currentUser ? (
                     <div className="flex flex-col items-center justify-center min-h-screen text-center p-6 bg-gray-50">

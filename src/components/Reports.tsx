@@ -136,10 +136,7 @@ export default function Reports({ currentUser }: Props) {
                         <option value="this-quarter">This Quarter</option>
                         <option value="all-time">All Time</option>
                     </select>
-                    <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2">
-                        <Download className="w-4 h-4" />
-                        Export
-                    </button>
+
                 </div>
             </div>
 

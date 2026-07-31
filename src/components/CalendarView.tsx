@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { User, Task } from '../types/types';
 import { users, teams, tasks, clients, workCategories } from '../data/mockData';
 import { ChevronLeft, ChevronRight, ChevronDown, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
@@ -15,10 +16,35 @@ type TaskPageMode = 'calendar' | 'list' | 'board' | 'timeline';
 type SortOption = 'dueDate' | 'priority' | 'assignee' | 'status' | 'hours' | 'employee';
 
 export default function CalendarView({ currentUser }: Props) {
+  const navigate = useNavigate();
   const [currentDate, setCurrentDate] = useState(new Date('2026-07-28'));
   const [pageMode, setPageMode] = useState<TaskPageMode>('calendar');
   const [viewMode, setViewMode] = useState<CalendarView>('month');
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
+
+  const handleNewTask = () => {
+    const blankTask: Task = {
+      id: `new-${Date.now()}`,
+      requestId: '',
+      title: '',
+      description: '',
+      categoryId: '',
+      clientId: '',
+      requesterId: currentUser.id,
+      priority: 'normal',
+      status: 'new_request',
+      estimatedHours: 0,
+      dueDate: '',
+      createdDate: new Date().toISOString(),
+      teamIds: [],
+      requiredSkillIds: [],
+      subtaskIds: [],
+      dependencyIds: [],
+      linkedTaskIds: []
+    };
+    setSelectedTask(blankTask);
+    setIsTaskPanelOpen(true);
+  };
 
   const toggleTaskExpansion = (taskId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -894,7 +920,10 @@ export default function CalendarView({ currentUser }: Props) {
             <Filter className="w-4 h-4" />
             Filters
           </button>
-          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2">
+          <button 
+            onClick={handleNewTask}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
+          >
             <Plus className="w-4 h-4" />
             New Task
           </button>
