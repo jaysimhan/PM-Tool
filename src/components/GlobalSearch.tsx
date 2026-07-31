@@ -1,0 +1,193 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Search, User as UserIcon, Tag, CheckSquare, X, CheckCircle2, ClipboardList, Users, Folder, Triangle, MoreHorizontal, Clock, Trash2, Zap, MoreVertical, Globe } from 'lucide-react';
+import { useData } from '../contexts/DataContext';
+
+export function GlobalSearch({ isMac }: { isMac: boolean }) {
+    const { tasks, users } = useData();
+    const [query, setQuery] = useState('');
+    const [isOpen, setIsOpen] = useState(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+    const wrapperRef = useRef<HTMLDivElement>(null);
+
+    // Keyboard shortcut to focus
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+                e.preventDefault();
+                inputRef.current?.focus();
+            }
+            if (e.key === 'Escape') {
+                setIsOpen(false);
+                inputRef.current?.blur();
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, []);
+
+    // Close on click outside
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+                setIsOpen(false);
+            }
+        };
+
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const normalizedQuery = query.toLowerCase().trim();
+    const hasQuery = normalizedQuery.length > 0;
+
+    const handleSelect = () => {
+        setIsOpen(false);
+        setQuery('');
+        inputRef.current?.blur();
+    };
+
+    return (
+        <div className="relative group w-full" ref={wrapperRef}>
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 group-hover:text-gray-500" />
+            <input 
+                ref={inputRef}
+                type="text" 
+                placeholder="Search" 
+                value={query}
+                onChange={(e) => {
+                    setQuery(e.target.value);
+                    setIsOpen(true);
+                }}
+                onFocus={() => setIsOpen(true)}
+                className="w-full pl-10 pr-12 py-2 bg-gray-50 border border-gray-200 rounded-full text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 focus:bg-white transition-all shadow-sm"
+            />
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                {query ? (
+                    <button onClick={() => { setQuery(''); setIsOpen(false); }} className="p-0.5 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100">
+                        <X className="w-3 h-3" />
+                    </button>
+                ) : (
+                    <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] font-medium text-gray-400 bg-white border border-gray-200 rounded shadow-sm">
+                        {isMac ? "⌘K" : "Ctrl+K"}
+                    </kbd>
+                )}
+            </div>
+
+            {/* Suggestions Dropdown */}
+            {isOpen && (
+                <div className="absolute top-full mt-2 -left-16 md:left-0 right-0 md:-right-32 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50">
+                    <div className="max-h-[80vh] overflow-y-auto">
+                        
+                        {/* Filter Pills */}
+                        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 overflow-x-auto no-scrollbar">
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
+                                <CheckCircle2 className="w-4 h-4" /> Tasks
+                            </button>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
+                                <ClipboardList className="w-4 h-4" /> Projects
+                            </button>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
+                                <UserIcon className="w-4 h-4" /> People
+                            </button>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
+                                <Folder className="w-4 h-4" /> Portfolios
+                            </button>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
+                                <Triangle className="w-4 h-4" /> Goals
+                            </button>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
+                                More
+                            </button>
+                        </div>
+
+                        {/* Search Results */}
+                        <div className="py-2">
+                            {hasQuery ? (
+                                <>
+                                    <div className="px-4 py-2 text-sm font-semibold text-gray-500">Tasks</div>
+                                    {tasks.filter(t => t.title.toLowerCase().includes(normalizedQuery) || (t.tags && t.tags.some(tag => tag.name.toLowerCase().includes(normalizedQuery)))).slice(0, 10).map(task => (
+                                        <button key={task.id} onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
+                                            <div className="flex items-center gap-4">
+                                                <div className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center text-gray-500">
+                                                    <CheckSquare className="w-4 h-4" />
+                                                </div>
+                                                <div>
+                                                    <div className="text-sm text-gray-900 font-medium">{task.title}</div>
+                                                    <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
+                                                        {task.status.replace('_', ' ')}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </button>
+                                    ))}
+                                    {tasks.filter(t => t.title.toLowerCase().includes(normalizedQuery) || (t.tags && t.tags.some(tag => tag.name.toLowerCase().includes(normalizedQuery)))).length === 0 && (
+                                        <div className="px-4 py-3 text-sm text-gray-500 text-center">No tasks found.</div>
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    <div className="px-4 py-2 text-sm font-semibold text-gray-500">Recents</div>
+                                    
+                                    {/* Recent Item 1 */}
+                                    <button onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-8 h-8 rounded bg-yellow-100 flex items-center justify-center text-yellow-700 font-bold text-lg">N</div>
+                                            <div>
+                                                <div className="text-sm text-gray-900 font-medium">test</div>
+                                                <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
+                                                    <div className="w-2 h-2 rounded-full bg-gray-300"></div>
+                                                    PR Calendar - All Geos
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </button>
+
+                                    {/* Recent Item 2 */}
+                                    <button onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-8 h-8 rounded bg-pink-100 flex items-center justify-center text-pink-600">
+                                                <ClipboardList className="w-5 h-5" />
+                                            </div>
+                                            <div className="text-sm text-gray-900 font-medium">Creative requests</div>
+                                        </div>
+                                    </button>
+
+                                    {/* Recent Item 3 */}
+                                    <button onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-8 h-8 rounded bg-gray-200 flex items-center justify-center text-gray-700">
+                                                <Triangle className="w-5 h-5" />
+                                            </div>
+                                            <div className="text-sm text-gray-900 font-medium">Video Calendar - All Geos</div>
+                                        </div>
+                                    </button>
+                                </>
+                            )}
+                        </div>
+
+                        {/* Saved Searches Section */}
+                        <div className="py-3 px-4 border-t border-gray-100">
+                            <div className="text-sm font-semibold text-gray-500 mb-3">Saved searches</div>
+                            <div className="flex flex-wrap gap-2">
+                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
+                                    <CheckCircle2 className="w-4 h-4" /> Tasks I've created
+                                </button>
+                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
+                                    <CheckCircle2 className="w-4 h-4" /> Tasks I've assigned to others
+                                </button>
+                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
+                                    <CheckCircle2 className="w-4 h-4" /> Recently completed tasks
+                                </button>
+                                <button className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-full text-sm text-gray-800 transition-colors">
+                                    <Trash2 className="w-4 h-4" /> Deleted
+                                </button>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}

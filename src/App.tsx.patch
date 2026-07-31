@@ -1,0 +1,58 @@
+--- src/App.tsx
++++ src/App.tsx
+@@ -111,8 +111,54 @@
+     if (authLoading) return <PageLoader />;
+ 
+     return (
+-                                    <optgroup label="Member">
+-                                        {users.filter(u => u.role === 'team_member' || u.role === 'team_leader').map(user => (
+-                                            <option key={user.id} value={user.id}>{user.name} (Member)</option>
+-                                        ))}
+-                                    </optgroup>
+-                                </select>
+-                            )}
++        <Routes>
++            <Route path="/login" element={!session ? <Login /> : <Navigate to="/" />} />
++            <Route path="*" element={
++                session && currentUser ? (
++                    <div className="min-h-screen bg-gray-50 flex">
++                        {/* Sidebar */}
++                        <aside className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ${isSidebarOpen ? 'w-64' : 'w-20'}`}>
++                            <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200">
++                                <div className="flex items-center gap-3 overflow-hidden">
++                                    <Logo className="w-8 h-8 rounded-lg flex-shrink-0" />
++                                    {isSidebarOpen && <span className="font-semibold text-gray-900 truncate">WorkFlow Pro</span>}
++                                </div>
++                                <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500">
++                                    <Menu className="w-5 h-5" />
++                                </button>
++                            </div>
++                            <nav className="flex-1 overflow-y-auto py-4">
++                                <ul className="space-y-1 px-3">
++                                    {navItems.map(item => (
++                                        <li key={item.id}>
++                                            <button
++                                                onClick={() => setActivePage(item.id as Page)}
++                                                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
++                                                    activePage === item.id 
++                                                        ? 'bg-blue-50 text-blue-700' 
++                                                        : 'text-gray-700 hover:bg-gray-100'
++                                                }`}
++                                                title={!isSidebarOpen ? item.label : undefined}
++                                            >
++                                                <item.icon className="w-5 h-5 flex-shrink-0" />
++                                                {isSidebarOpen && <span className="font-medium truncate">{item.label}</span>}
++                                            </button>
++                                        </li>
++                                    ))}
++                                </ul>
++                            </nav>
++                        </aside>
++                        
++                        <div className="flex-1 flex flex-col min-w-0">
++                            <header className="bg-white border-b border-gray-200 h-16 flex items-center justify-between px-6 sticky top-0 z-50">
++                                <div className="flex-1 max-w-xl hidden md:block">
++                                    <GlobalSearch isMac={isMac} />
++                                </div>
++                                
++                                <div className="flex items-center gap-4 ml-auto">
