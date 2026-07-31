@@ -40,7 +40,9 @@ export default function CalendarView({ currentUser }: Props) {
       requiredSkillIds: [],
       subtaskIds: [],
       dependencyIds: [],
-      linkedTaskIds: []
+      linkedTaskIds: [],
+      tags: [],
+      isSubtask: false
     };
     setSelectedTask(blankTask);
     setIsTaskPanelOpen(true);
