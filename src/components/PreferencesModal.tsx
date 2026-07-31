@@ -195,23 +195,25 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
                             </h3>
                             
                             <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 space-y-4">
-                                <div className="flex items-start justify-between">
-                                    <div>
-                                        <h4 className="text-sm font-medium text-gray-900 flex items-center gap-2">
-                                            Two-Factor Authentication (2FA)
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="flex-1 flex flex-col gap-1.5">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <h4 className="text-sm font-medium text-gray-900">
+                                                Two-Factor Authentication (2FA)
+                                            </h4>
                                             {isMfaEnabled ? (
-                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                                                <span className="inline-flex whitespace-nowrap items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
                                                     <ShieldCheck className="w-3 h-3" />
                                                     Enabled
                                                 </span>
                                             ) : (
-                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
+                                                <span className="inline-flex whitespace-nowrap items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
                                                     <ShieldAlert className="w-3 h-3" />
                                                     Disabled
                                                 </span>
                                             )}
-                                        </h4>
-                                        <p className="mt-1 text-xs text-gray-500 max-w-[250px]">
+                                        </div>
+                                        <p className="text-xs text-gray-500">
                                             Secure your account with an Authenticator app (like Google Authenticator).
                                         </p>
                                     </div>
@@ -219,10 +221,10 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
                                         <button
                                             onClick={isMfaEnabled ? handleDisableMfa : handleEnableMfa}
                                             disabled={mfaLoading}
-                                            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                                            className={`px-3 py-1.5 whitespace-nowrap flex-shrink-0 text-sm font-medium rounded-lg transition-colors border shadow-sm ${
                                                 isMfaEnabled
-                                                    ? 'bg-red-50 text-red-600 hover:bg-red-100'
-                                                    : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                                                    ? 'bg-white border-red-200 text-red-600 hover:bg-red-50'
+                                                    : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
                                             }`}
                                         >
                                             {mfaLoading ? '...' : isMfaEnabled ? 'Disable 2FA' : 'Enable 2FA'}

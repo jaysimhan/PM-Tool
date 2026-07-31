@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { User } from '../types/types';
-import { Users as UsersIcon, UserPlus, Settings, Award } from 'lucide-react';
+import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
-import { supabase } from '../lib/supabaseClient';
+import { supabase, supabaseAdmin } from '../lib/supabaseClient';
 
 interface Props {
     currentUser: User;
@@ -11,7 +11,12 @@ interface Props {
 export default function TeamManagement({ currentUser }: Props) {
     const { users, teams, skills, refreshTeams } = useData();
     const [selectedTeam, setSelectedTeam] = useState<string>(teams[0]?.id || '');
-    const [showAddMember, setShowAddMember] = useState(false);
+    const [showInviteMember, setShowInviteMember] = useState(false);
+    const [inviteSearch, setInviteSearch] = useState('');
+    const [selectedInvitees, setSelectedInvitees] = useState<User[]>([]);
+    const [showInviteDropdown, setShowInviteDropdown] = useState(false);
+    const [inviteRole, setInviteRole] = useState('Editor');
+    const [inviteMessage, setInviteMessage] = useState('');
     const [showCreateTeam, setShowCreateTeam] = useState(false);
     const [newTeamName, setNewTeamName] = useState('');
     const [newTeamDesc, setNewTeamDesc] = useState('');
@@ -30,13 +35,8 @@ export default function TeamManagement({ currentUser }: Props) {
     const team = teams.find(t => t.id === selectedTeam);
     const teamMembers = team ? users.filter(u => team.memberIds.includes(u.id)) : [];
     const teamLeader = team ? users.find(u => u.id === team.leaderId) : null;
-
     const getSkillName = (skillId: string) => {
         return skills.find(s => s.id === skillId)?.name || skillId;
-    };
-
-    const handleAddMember = () => {
-        setShowAddMember(true);
     };
 
     const handleRemoveMember = async (userId: string) => {
@@ -57,19 +57,90 @@ export default function TeamManagement({ currentUser }: Props) {
         }
     };
 
-    const handleAddMemberToTeam = async (userId: string) => {
+    const handleSendInvites = async () => {
         if (!team) return;
-        const { error } = await supabase
-            .from('team_members')
-            .insert({ team_id: team.id, user_id: userId });
+        let successfulInvites = 0;
+
+        let inviteesToProcess = [...selectedInvitees];
         
-        if (error) {
-            console.error('Error adding member:', error);
-            alert('Error adding member.');
-        } else {
-            await refreshTeams();
-            setShowAddMember(false);
+        // Auto-add whatever is currently typed in the input field when hitting send
+        if (inviteSearch.trim()) {
+            const parts = inviteSearch.split(',');
+            parts.forEach((part, index) => {
+                const searchStr = part.trim();
+                if (searchStr) {
+                    const matchedUser = users.find(u => u.email.toLowerCase() === searchStr.toLowerCase() || u.name.toLowerCase() === searchStr.toLowerCase());
+                    if (matchedUser && !inviteesToProcess.find(u => u.id === matchedUser.id)) {
+                        inviteesToProcess.push(matchedUser);
+                    } else if (!matchedUser && !inviteesToProcess.find(u => u.email === searchStr)) {
+                        inviteesToProcess.push({ 
+                            id: `temp-${Date.now()}-auto-${index}`, 
+                            name: searchStr, 
+                            email: searchStr, 
+                            role: 'team_member', 
+                            avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${searchStr}&backgroundColor=3b82f6` 
+                        } as any);
+                    }
+                }
+            });
         }
+
+        for (const user of inviteesToProcess) {
+            let userId = user.id;
+
+            // If the user ID starts with temp-, they are a new user that needs to be invited via Supabase Auth
+            if (userId.startsWith('temp-')) {
+                const { data, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(user.email, {
+                    data: {
+                        name: user.name,
+                    }
+                });
+                
+                if (inviteError) {
+                    console.error('Error inviting user via Supabase:', inviteError);
+                    const errorMsg = inviteError.message && Object.keys(inviteError.message).length > 0
+                        ? inviteError.message
+                        : `Status ${inviteError.status || 'Unknown'} - Please check your Supabase SMTP settings.`;
+                    alert(`Failed to send invite email to ${user.email}: ${errorMsg}`);
+                    continue; // Skip adding to team if invite failed
+                }
+                
+                if (data && data.user) {
+                    userId = data.user.id; // Get the real Supabase Auth user ID
+                }
+            }
+
+            const { error } = await supabase
+                .from('team_members')
+                .insert({ team_id: team.id, user_id: userId });
+            
+            if (error) {
+                console.error('Error adding member:', error);
+            } else {
+                successfulInvites++;
+            }
+        }
+        
+        if (successfulInvites > 0) {
+            let alertMsg = `Successfully added and sent invitations to ${successfulInvites} user(s).`;
+            if (inviteMessage.trim()) {
+                alertMsg += `\n\nMessage included:\n${inviteMessage}`;
+            }
+            alert(alertMsg);
+        }
+        
+        await refreshTeams();
+        setShowInviteMember(false);
+        setSelectedInvitees([]);
+        setInviteSearch('');
+        setInviteMessage('');
+    };
+
+    const handleCopyLink = () => {
+        if (!team) return;
+        const link = `${window.location.origin}/team/invite/${team.id}`;
+        navigator.clipboard.writeText(link);
+        alert('Invite link copied to clipboard: ' + link);
     };
 
     const handleCreateTeam = async () => {
@@ -223,13 +294,15 @@ export default function TeamManagement({ currentUser }: Props) {
                     <div className="bg-white rounded-lg border border-gray-200 p-6">
                         <div className="flex items-center justify-between mb-4">
                             <h2 className="text-lg font-semibold text-gray-900">Team Members</h2>
-                            <button
-                                onClick={handleAddMember}
-                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
-                            >
-                                <UserPlus className="w-4 h-4" />
-                                Add Member
-                            </button>
+                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'team_leader') && (
+                                <button
+                                    onClick={() => setShowInviteMember(true)}
+                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
+                                >
+                                    <UserPlus className="w-4 h-4" />
+                                    Invite Team Member
+                                </button>
+                            )}
                         </div>
 
                         <div className="space-y-3">
@@ -341,44 +414,145 @@ export default function TeamManagement({ currentUser }: Props) {
                 </>
             )}
 
-            {/* Add Member Modal (simplified) */}
-            {showAddMember && (
+            {/* Invite Member Modal */}
+            {showInviteMember && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-                        <h3 className="text-lg font-semibold text-gray-900 mb-4">Add Team Member</h3>
-                        <p className="text-sm text-gray-600 mb-4">
-                            Select an existing user to add to {team?.name}
-                        </p>
-
-                        <div className="space-y-3 mb-6 max-h-60 overflow-y-auto">
-                            {users
-                                .filter(u => !team?.memberIds.includes(u.id) && u.role !== 'super_admin')
-                                .map(user => (
-                                    <div key={user.id} className="border border-gray-200 rounded p-3 hover:border-blue-300 cursor-pointer">
-                                        <div className="flex items-center justify-between">
-                                            <div>
-                                                <div className="text-sm font-medium text-gray-900">{user.name}</div>
-                                                <div className="text-xs text-gray-500">{user.email}</div>
-                                            </div>
-                                            <button 
-                                                onClick={() => handleAddMemberToTeam(user.id)}
-                                                className="px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
-                                            >
-                                                Add
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))}
-                        </div>
-
-                        <div className="flex justify-end gap-2">
-                            <button
-                                onClick={() => setShowAddMember(false)}
-                                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
-                            >
-                                Cancel
+                    <div className="bg-white rounded-xl p-6 max-w-[550px] w-full mx-4 shadow-2xl font-sans" onClick={() => setShowInviteDropdown(false)}>
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xl text-gray-800">Invite</h3>
+                            <button className="p-2 hover:bg-gray-100 rounded-full text-gray-600" onClick={() => setShowInviteMember(false)}>
+                                <X className="w-5 h-5" />
                             </button>
                         </div>
+
+                        {/* Input area */}
+                        <div className="relative mb-2" onClick={(e) => e.stopPropagation()}>
+                            <div 
+                                className={`border ${selectedInvitees.length > 0 ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500'} rounded flex flex-wrap items-start p-1.5 transition-colors`}
+                            >
+                                <div className="flex flex-wrap gap-1.5 flex-1 items-center min-w-[200px]">
+                                    {selectedInvitees.map(user => (
+                                        <div key={user.id} className="flex items-center gap-1.5 bg-white border border-gray-300 rounded-full px-1 py-0.5">
+                                            <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center text-xs font-medium text-blue-700">
+                                                {user.name.split(' ').map(n => n[0]).join('')}
+                                            </div>
+                                            <span className="text-sm text-gray-800 whitespace-nowrap">{user.name}</span>
+                                            <button 
+                                                onClick={() => setSelectedInvitees(selectedInvitees.filter(u => u.id !== user.id))} 
+                                                className="p-0.5 hover:bg-gray-200 rounded-full mr-0.5"
+                                            >
+                                                <X className="w-3.5 h-3.5 text-gray-600" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <input
+                                        type="text"
+                                        placeholder={selectedInvitees.length === 0 ? "Add people" : ""}
+                                        value={inviteSearch}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            if (val.includes(',')) {
+                                                const parts = val.split(',');
+                                                let newInvitees = [...selectedInvitees];
+                                                parts.forEach((part, index) => {
+                                                    const searchStr = part.trim();
+                                                    if (searchStr) {
+                                                        const matchedUser = users.find(u => u.email.toLowerCase() === searchStr.toLowerCase() || u.name.toLowerCase() === searchStr.toLowerCase());
+                                                        if (matchedUser && !newInvitees.find(u => u.id === matchedUser.id)) {
+                                                            newInvitees.push(matchedUser);
+                                                        } else if (!matchedUser && !newInvitees.find(u => u.email === searchStr)) {
+                                                            newInvitees.push({ 
+                                                                id: `temp-${Date.now()}-${index}`, 
+                                                                name: searchStr, 
+                                                                email: searchStr, 
+                                                                role: 'team_member', 
+                                                                avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${searchStr}&backgroundColor=3b82f6` 
+                                                            } as any);
+                                                        }
+                                                    }
+                                                });
+                                                setSelectedInvitees(newInvitees);
+                                                setInviteSearch('');
+                                            } else {
+                                                setInviteSearch(val);
+                                            }
+                                        }}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && inviteSearch.trim()) {
+                                                e.preventDefault();
+                                                const searchStr = inviteSearch.trim();
+                                                // Find if it matches an existing user, else create a dummy one for the invite
+                                                const matchedUser = users.find(u => u.email.toLowerCase() === searchStr.toLowerCase() || u.name.toLowerCase() === searchStr.toLowerCase());
+                                                
+                                                if (matchedUser && !selectedInvitees.find(u => u.id === matchedUser.id)) {
+                                                    setSelectedInvitees([...selectedInvitees, matchedUser]);
+                                                } else if (!matchedUser) {
+                                                    // Allow inviting external emails
+                                                    setSelectedInvitees([...selectedInvitees, { 
+                                                        id: `temp-${Date.now()}`, 
+                                                        name: searchStr, 
+                                                        email: searchStr, 
+                                                        role: 'team_member', 
+                                                        avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${searchStr}&backgroundColor=3b82f6` 
+                                                    } as any]);
+                                                }
+                                                setInviteSearch('');
+                                            }
+                                        }}
+                                        className="flex-1 min-w-[150px] outline-none text-sm px-1.5 py-1 text-gray-800 placeholder-gray-500"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {selectedInvitees.length > 0 ? (
+                            <div className="flex flex-col mt-4">
+                                <div className="border border-gray-300 rounded-md">
+                                   <textarea 
+                                       className="w-full rounded-md p-3 text-[15px] h-32 focus:outline-none placeholder-gray-500 resize-none"
+                                       placeholder="Message"
+                                       value={inviteMessage}
+                                       onChange={(e) => setInviteMessage(e.target.value)}
+                                   />
+                                </div>
+                                <div className="flex justify-end gap-3 mt-4">
+                                    <button 
+                                        onClick={() => {
+                                            setSelectedInvitees([]);
+                                            setInviteSearch('');
+                                            setInviteMessage('');
+                                        }}
+                                        className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button 
+                                        onClick={handleSendInvites}
+                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                                    >
+                                        Send
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="mt-6">
+                                <div className="flex justify-between items-center">
+                                    <button 
+                                        onClick={handleCopyLink}
+                                        className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
+                                    >
+                                        <LinkIcon className="w-4 h-4" />
+                                        Copy link
+                                    </button>
+                                    <button 
+                                        onClick={() => setShowInviteMember(false)}
+                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                                    >
+                                        Done
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}

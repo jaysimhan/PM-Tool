@@ -11,3 +11,10 @@ export const supabase = createClient(
   supabaseUrl || 'http://localhost:54321', // Fallback for local development if unset
   supabaseAnonKey || 'public-anon-key'
 );
+
+const supabaseServiceRoleKey = import.meta.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+
+export const supabaseAdmin = createClient(
+  supabaseUrl || 'http://localhost:54321',
+  supabaseServiceRoleKey || 'service-role-key'
+);

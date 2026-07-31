@@ -9,6 +9,11 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
     const inputRef = useRef<HTMLInputElement>(null);
     const wrapperRef = useRef<HTMLDivElement>(null);
 
+    const [recentSearches, setRecentSearches] = useState<string[]>(() => {
+        const saved = localStorage.getItem('recentSearches');
+        return saved ? JSON.parse(saved) : [];
+    });
+
     // Keyboard shortcut to focus
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -42,6 +47,12 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
     const hasQuery = normalizedQuery.length > 0;
 
     const handleSelect = () => {
+        if (query.trim()) {
+            const q = query.trim();
+            const updated = [q, ...recentSearches.filter(s => s !== q)].slice(0, 5);
+            setRecentSearches(updated);
+            localStorage.setItem('recentSearches', JSON.stringify(updated));
+        }
         setIsOpen(false);
         setQuery('');
         inputRef.current?.blur();
@@ -60,6 +71,14 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                     setIsOpen(true);
                 }}
                 onFocus={() => setIsOpen(true)}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter' && query.trim()) {
+                        const q = query.trim();
+                        const updated = [q, ...recentSearches.filter(s => s !== q)].slice(0, 5);
+                        setRecentSearches(updated);
+                        localStorage.setItem('recentSearches', JSON.stringify(updated));
+                    }
+                }}
                 className="w-full pl-10 pr-12 py-2 bg-gray-50 border border-gray-200 rounded-full text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 focus:bg-white transition-all shadow-sm"
             />
             <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
@@ -68,8 +87,9 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                         <X className="w-3 h-3" />
                     </button>
                 ) : (
-                    <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] font-medium text-gray-400 bg-white border border-gray-200 rounded shadow-sm">
-                        {isMac ? "⌘K" : "Ctrl+K"}
+                    <kbd className="hidden sm:inline-flex items-center justify-center gap-1 h-5 px-2 text-[11px] font-medium text-gray-500 bg-white border border-gray-200 rounded shadow-sm">
+                        <span className={isMac ? "text-[14px]" : ""}>{isMac ? "⌘" : "Ctrl"}</span>
+                        <span>K</span>
                     </kbd>
                 )}
             </div>
@@ -85,19 +105,13 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                                 <CheckCircle2 className="w-4 h-4" /> Tasks
                             </button>
                             <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
-                                <ClipboardList className="w-4 h-4" /> Projects
-                            </button>
-                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
                                 <UserIcon className="w-4 h-4" /> People
                             </button>
                             <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
-                                <Folder className="w-4 h-4" /> Portfolios
+                                <Globe className="w-4 h-4" /> Brand
                             </button>
                             <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
-                                <Triangle className="w-4 h-4" /> Goals
-                            </button>
-                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
-                                More
+                                <Tag className="w-4 h-4" /> Tag
                             </button>
                         </div>
 
@@ -124,6 +138,31 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                                     {tasks.filter(t => t.title.toLowerCase().includes(normalizedQuery) || (t.tags && t.tags.some(tag => tag.name.toLowerCase().includes(normalizedQuery)))).length === 0 && (
                                         <div className="px-4 py-3 text-sm text-gray-500 text-center">No tasks found.</div>
                                     )}
+                                </>
+                            ) : recentSearches.length > 0 ? (
+                                <>
+                                    <div className="px-4 py-2 flex items-center justify-between">
+                                        <div className="text-sm font-semibold text-gray-500">Recent Searches</div>
+                                        <button 
+                                            onClick={() => {
+                                                setRecentSearches([]);
+                                                localStorage.removeItem('recentSearches');
+                                            }}
+                                            className="text-xs text-blue-600 hover:text-blue-700 font-medium transition-colors"
+                                        >
+                                            Clear history
+                                        </button>
+                                    </div>
+                                    {recentSearches.map((search, idx) => (
+                                        <button 
+                                            key={idx} 
+                                            onClick={() => setQuery(search)} 
+                                            className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center gap-3 group transition-colors"
+                                        >
+                                            <Clock className="w-4 h-4 text-gray-400 group-hover:text-gray-500" />
+                                            <span className="text-sm text-gray-700">{search}</span>
+                                        </button>
+                                    ))}
                                 </>
                             ) : (
                                 <div className="px-4 py-8 text-sm text-gray-500 text-center">
