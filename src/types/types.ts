@@ -78,6 +78,16 @@ export interface Client {
     id: string;
     name: string;
     department?: string;
+    website?: string;
+    favicon?: string;
+}
+
+export interface Region {
+    id: string;
+    name: string;
+    code: string;
+    flag?: string;
+    created_at?: string;
 }
 
 export interface Task {
@@ -87,6 +97,8 @@ export interface Task {
     description: string;
     categoryId: string;
     clientId: string;
+    regionId?: string;
+    region?: Region;
     department?: string;
     requesterId: string;
     priority?: Priority;

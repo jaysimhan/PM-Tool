@@ -1,16 +1,20 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { User } from '../types/types';
-import { workCategories, clients, tasks } from '../data/mockData';
-import { FileText, Send, X, Link as LinkIcon, Settings, Copy, Eye } from 'lucide-react';
+import { FileText, Send, X, Link as LinkIcon, Settings, Copy, Eye, Calendar } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
 import { useData } from '../contexts/DataContext';
+import { SingleDatePicker } from './SingleDatePicker';
+import { format } from 'date-fns';
+import { getRandomColor } from '../utils/colors';
+import toast from 'react-hot-toast';
 
 interface Props {
     currentUser: User;
 }
 
 export default function RequestForm({ currentUser }: Props) {
-    const { refreshTasks } = useData();
+    const { refreshTasks, refreshClients, workCategories, clients, tasks, regions, allTags, refreshTags } = useData();
 
     const [formData, setFormData] = useState({
         title: '',
@@ -21,13 +25,22 @@ export default function RequestForm({ currentUser }: Props) {
         priority: 'normal',
         dueDate: '',
         estimatedHours: '',
-        tags: ''
+        tags: '',
+        regionId: ''
     });
 
     const [showSuccess, setShowSuccess] = useState(false);
     const [showShareModal, setShowShareModal] = useState(false);
     const [showCustomizeModal, setShowCustomizeModal] = useState(false);
-    const [shareableLink] = useState('https://workflow-pro.app/request/f7a9b2c1');
+    const [showDatePicker, setShowDatePicker] = useState(false);
+    const [tagInput, setTagInput] = useState('');
+    const [shareSettings, setShareSettings] = useState({
+        publicAccess: true,
+        requireVerification: false,
+        sendConfirmation: true
+    });
+    const baseUrl = import.meta.env.VITE_VERCEL_URL || import.meta.env.VITE_APP_URL || 'https://workflow-pro.app';
+    const [shareableLink] = useState(`${baseUrl}/request/f7a9b2c1`);
 
     const isAdmin = currentUser.role === 'super_admin' || currentUser.role === 'admin';
 
@@ -38,7 +51,7 @@ export default function RequestForm({ currentUser }: Props) {
         setIsSubmitting(true);
         
         try {
-            const { error } = await supabase.from('tasks').insert({
+            const { data: taskData, error } = await supabase.from('tasks').insert({
                 title: formData.title,
                 description: formData.description,
                 client_id: formData.clientId || null,
@@ -46,11 +59,73 @@ export default function RequestForm({ currentUser }: Props) {
                 due_date: formData.dueDate || null,
                 estimated_hours: formData.estimatedHours ? parseFloat(formData.estimatedHours) : null,
                 requester_id: currentUser.id,
+                region_id: formData.regionId || null,
+                department: formData.department || null,
                 status: 'new_request'
-            });
+            }).select().single();
 
             if (error) throw error;
             
+            // Check if department is new for this brand and add it if so
+            if (formData.clientId && formData.department) {
+                const client = clients.find(c => c.id === formData.clientId);
+                if (client) {
+                    const existingDepts = client.department 
+                        ? client.department.split(',').map(d => d.trim()).filter(Boolean) 
+                        : [];
+                    const newDept = formData.department.trim();
+                    
+                    if (newDept && !existingDepts.some(d => d.toLowerCase() === newDept.toLowerCase())) {
+                        const updatedDepts = client.department ? `${client.department}, ${newDept}` : newDept;
+                        await supabase
+                            .from('clients')
+                            .update({ department: updatedDepts })
+                            .eq('id', client.id);
+                        
+                        await refreshClients();
+                    }
+                }
+            }
+
+            // Handle Tags
+            if (formData.tags) {
+                const tagNames = formData.tags.split(',').map(t => t.trim()).filter(Boolean).map(name => name.charAt(0).toUpperCase() + name.slice(1));
+                const uniqueTagNames = Array.from(new Set(tagNames));
+                
+                const existingTags = allTags.filter(t => uniqueTagNames.some(ut => ut.toLowerCase() === t.name.toLowerCase()));
+                const existingTagNamesLower = existingTags.map(t => t.name.toLowerCase());
+                
+                const newTagNames = uniqueTagNames.filter(name => !existingTagNamesLower.includes(name.toLowerCase()));
+                
+                let finalTaskTags = [...existingTags];
+                
+                if (newTagNames.length > 0) {
+                    const newTagsData = newTagNames.map(name => ({
+                        name,
+                        color: getRandomColor()
+                    }));
+                    
+                    const { data: insertedTags, error: insertError } = await supabase
+                        .from('tags')
+                        .insert(newTagsData)
+                        .select();
+                        
+                    if (insertError) throw insertError;
+                    if (insertedTags) {
+                        finalTaskTags = [...finalTaskTags, ...insertedTags];
+                    }
+                    await refreshTags();
+                }
+
+                if (finalTaskTags.length > 0 && taskData) {
+                    const taskTagsData = finalTaskTags.map(tag => ({
+                        task_id: taskData.id,
+                        tag_id: tag.id
+                    }));
+                    await supabase.from('task_tags').insert(taskTagsData);
+                }
+            }
+
             await refreshTasks();
             setShowSuccess(true);
             
@@ -64,13 +139,14 @@ export default function RequestForm({ currentUser }: Props) {
                 priority: 'normal',
                 dueDate: '',
                 estimatedHours: '',
-                tags: ''
+                tags: '',
+                regionId: ''
             });
 
             setTimeout(() => setShowSuccess(false), 3000);
         } catch (error) {
             console.error('Error submitting request:', error);
-            alert('Failed to submit request.');
+            toast.error('Failed to submit request.');
         } finally {
             setIsSubmitting(false);
         }
@@ -83,9 +159,60 @@ export default function RequestForm({ currentUser }: Props) {
         });
     };
 
+    const handleTagKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === ',' || e.key === 'Enter') {
+            e.preventDefault();
+            const newTag = tagInput.trim().replace(/,$/, '');
+            if (newTag) {
+                const currentTags = formData.tags ? formData.tags.split(',').map(t => t.trim()) : [];
+                if (!currentTags.includes(newTag)) {
+                    setFormData({
+                        ...formData,
+                        tags: currentTags.length > 0 ? `${formData.tags}, ${newTag}` : newTag
+                    });
+                }
+                setTagInput('');
+            }
+        } else if (e.key === 'Backspace' && tagInput === '') {
+            e.preventDefault();
+            const currentTags = formData.tags ? formData.tags.split(',').map(t => t.trim()) : [];
+            if (currentTags.length > 0) {
+                currentTags.pop();
+                setFormData({
+                    ...formData,
+                    tags: currentTags.join(', ')
+                });
+            }
+        }
+    };
+
+    const handleTagChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.value.includes(',')) {
+            const parts = e.target.value.split(',');
+            const newTags = parts.map(p => p.trim()).filter(Boolean);
+            const currentTags = formData.tags ? formData.tags.split(',').map(t => t.trim()) : [];
+            const combined = Array.from(new Set([...currentTags, ...newTags]));
+            setFormData({
+                ...formData,
+                tags: combined.join(', ')
+            });
+            setTagInput('');
+        } else {
+            setTagInput(e.target.value);
+        }
+    };
+
+    const removeTag = (tagToRemove: string) => {
+        const currentTags = formData.tags.split(',').map(t => t.trim()).filter(t => t !== tagToRemove);
+        setFormData({
+            ...formData,
+            tags: currentTags.join(', ')
+        });
+    };
+
     const copyToClipboard = () => {
         navigator.clipboard.writeText(shareableLink);
-        alert('Link copied to clipboard!');
+        toast.success('Link copied to clipboard!');
     };
 
     return (
@@ -193,7 +320,7 @@ export default function RequestForm({ currentUser }: Props) {
                                 onChange={handleChange}
                                 required
                                 disabled={!isAdmin}
-                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
+                                className={`w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
                             >
                                 <option value="">Select a category</option>
                                 {workCategories.filter(c => c.isActive).map(category => (
@@ -212,11 +339,32 @@ export default function RequestForm({ currentUser }: Props) {
                                 onChange={handleChange}
                                 required
                                 disabled={!isAdmin}
-                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
+                                className={`w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
                             >
                                 <option value="">Select a brand</option>
                                 {clients.map(client => (
                                     <option key={client.id} value={client.id}>{client.name}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                Region <span className="text-red-500">*</span>
+                            </label>
+                            <select
+                                name="regionId"
+                                value={formData.regionId}
+                                onChange={handleChange}
+                                required
+                                disabled={!isAdmin}
+                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
+                            >
+                                <option value="">Select a region</option>
+                                {regions.map(region => (
+                                    <option key={region.id} value={region.id}>
+                                        {region.flag} {region.name}
+                                    </option>
                                 ))}
                             </select>
                         </div>
@@ -237,9 +385,14 @@ export default function RequestForm({ currentUser }: Props) {
                                 placeholder="Enter or select department"
                             />
                             <datalist id="department-suggestions">
-                                {Array.from(new Set(tasks.map(t => t.department).filter(Boolean))).map(dep => (
-                                    <option key={dep} value={dep} />
-                                ))}
+                                {clients.find(c => c.id === formData.clientId)?.department
+                                    ?.split(',')
+                                    .map(d => d.trim())
+                                    .filter(Boolean)
+                                    .map(dep => (
+                                        <option key={dep} value={dep} />
+                                    ))
+                                }
                             </datalist>
                         </div>
                     </div>
@@ -273,21 +426,29 @@ export default function RequestForm({ currentUser }: Props) {
                             <label className="block text-sm font-medium text-gray-700 mb-2">
                                 Due Date <span className="text-red-500">*</span>
                             </label>
-                            <input
-                                type="date"
-                                name="dueDate"
-                                value={formData.dueDate}
-                                onChange={handleChange}
-                                required
-                                disabled={!isAdmin}
-                                min={new Date().toISOString().split('T')[0]}
-                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                            />
+                            <div className="relative">
+                                <div 
+                                    className={`w-full px-3 py-2 border border-gray-300 rounded-lg flex items-center justify-between cursor-pointer ${!isAdmin ? 'bg-gray-50 text-gray-500 cursor-not-allowed' : 'bg-white hover:border-blue-500'}`}
+                                    onClick={() => isAdmin && setShowDatePicker(true)}
+                                >
+                                    <span className={formData.dueDate ? 'text-gray-900' : 'text-gray-400'}>
+                                        {formData.dueDate ? format(new Date(formData.dueDate), 'dd/MM/yyyy') : 'dd/mm/yyyy'}
+                                    </span>
+                                    <Calendar className="w-5 h-5 text-gray-400" />
+                                </div>
+                                {showDatePicker && isAdmin && (
+                                    <SingleDatePicker
+                                        date={formData.dueDate}
+                                        onChange={(date) => setFormData({ ...formData, dueDate: date })}
+                                        onClose={() => setShowDatePicker(false)}
+                                    />
+                                )}
+                            </div>
                         </div>
 
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Estimated Hours (optional)
+                                Estimated Hours to complete
                             </label>
                             <input
                                 type="number"
@@ -298,7 +459,7 @@ export default function RequestForm({ currentUser }: Props) {
                                 min="1"
                                 step="0.5"
                                 className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                                placeholder="Auto-calculated"
+                                placeholder="e.g. 5"
                             />
                         </div>
                     </div>
@@ -312,57 +473,74 @@ export default function RequestForm({ currentUser }: Props) {
                         <label className="block text-sm font-medium text-gray-700 mb-2">
                             Tags (comma-separated)
                         </label>
-                        <input
-                            type="text"
-                            name="tags"
-                            value={formData.tags}
-                            onChange={handleChange}
-                            disabled={!isAdmin}
-                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                            placeholder="campaign, social-media, q3-launch"
-                        />
+                        <div className={`w-full px-2 py-1.5 border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 flex flex-wrap gap-2 items-center ${!isAdmin ? 'bg-gray-50' : 'bg-white'}`}>
+                            {formData.tags.split(',').map(t => t.trim()).filter(Boolean).map((tag, idx) => (
+                                <span key={idx} className="flex items-center gap-1 px-2.5 py-1 bg-blue-100 text-blue-700 text-sm rounded-full">
+                                    {tag}
+                                    {isAdmin && (
+                                        <button 
+                                            type="button" 
+                                            onClick={() => removeTag(tag)} 
+                                            className="hover:bg-blue-200 rounded-full p-0.5 focus:outline-none"
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    )}
+                                </span>
+                            ))}
+                            <input
+                                type="text"
+                                name="tags"
+                                value={tagInput}
+                                onChange={handleTagChange}
+                                onKeyDown={handleTagKeyDown}
+                                disabled={!isAdmin}
+                                className="flex-1 min-w-[120px] bg-transparent focus:outline-none text-sm py-0.5"
+                                placeholder={(!formData.tags && tagInput === '') ? "campaign, social-media, q3-launch" : ""}
+                            />
+                        </div>
                     </div>
                 </div>
 
                 {/* Form Actions */}
-                {isAdmin && (
-                    <div className="flex items-center justify-end gap-3 border-t border-gray-200 pt-6">
-                        <button
-                            type="button"
-                            onClick={() => setFormData({
-                                title: '',
-                                description: '',
-                                categoryId: '',
-                                clientId: '',
-                                department: '',
-                                priority: 'normal',
-                                dueDate: '',
-                                estimatedHours: '',
-                                tags: ''
-                            })}
-                            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
-                        >
-                            Reset
-                        </button>
-                        <button
-                            type="submit"
-                            disabled={isSubmitting}
-                            className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50"
-                        >
-                            {isSubmitting ? (
-                                <>
-                                    <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                                    Submitting...
-                                </>
-                            ) : (
-                                <>
-                                    <Send className="w-4 h-4" />
-                                    Submit Request
-                                </>
-                            )}
-                        </button>
-                    </div>
-                )}
+                <div className="flex items-center justify-end gap-3 border-t border-gray-200 pt-6">
+                    <button
+                        type="button"
+                        onClick={() => setFormData({
+                            title: '',
+                            description: '',
+                            categoryId: '',
+                            clientId: '',
+                            department: '',
+                            priority: 'normal',
+                            dueDate: '',
+                            estimatedHours: '',
+                            tags: '',
+                            regionId: ''
+                        })}
+                        disabled={true}
+                        className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        Reset
+                    </button>
+                    <button
+                        type="submit"
+                        disabled={true}
+                        className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {isSubmitting ? (
+                            <>
+                                <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                                Submitting...
+                            </>
+                        ) : (
+                            <>
+                                <Send className="w-4 h-4" />
+                                Submit Request
+                            </>
+                        )}
+                    </button>
+                </div>
             </form>
 
             {/* Info Box */}
@@ -422,7 +600,12 @@ export default function RequestForm({ currentUser }: Props) {
                                     <div className="text-xs text-gray-500">Anyone with the link can submit requests</div>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
-                                    <input type="checkbox" className="sr-only peer" defaultChecked />
+                                    <input 
+                                        type="checkbox" 
+                                        className="sr-only peer" 
+                                        checked={shareSettings.publicAccess}
+                                        onChange={(e) => setShareSettings({...shareSettings, publicAccess: e.target.checked})}
+                                    />
                                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                                 </label>
                             </div>
@@ -433,7 +616,12 @@ export default function RequestForm({ currentUser }: Props) {
                                     <div className="text-xs text-gray-500">Requesters must verify their email</div>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
-                                    <input type="checkbox" className="sr-only peer" />
+                                    <input 
+                                        type="checkbox" 
+                                        className="sr-only peer" 
+                                        checked={shareSettings.requireVerification}
+                                        onChange={(e) => setShareSettings({...shareSettings, requireVerification: e.target.checked})}
+                                    />
                                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                                 </label>
                             </div>
@@ -444,7 +632,12 @@ export default function RequestForm({ currentUser }: Props) {
                                     <div className="text-xs text-gray-500">Auto-send confirmation to requester</div>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
-                                    <input type="checkbox" className="sr-only peer" defaultChecked />
+                                    <input 
+                                        type="checkbox" 
+                                        className="sr-only peer" 
+                                        checked={shareSettings.sendConfirmation}
+                                        onChange={(e) => setShareSettings({...shareSettings, sendConfirmation: e.target.checked})}
+                                    />
                                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                                 </label>
                             </div>
@@ -473,7 +666,16 @@ export default function RequestForm({ currentUser }: Props) {
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
                         <div className="flex items-center justify-between mb-4">
-                            <h3 className="text-lg font-semibold text-gray-900">Customize Request Form</h3>
+                            <div className="flex items-center gap-4">
+                                <h3 className="text-lg font-semibold text-gray-900">Customize Request Form</h3>
+                                <Link 
+                                    to="/form-setup"
+                                    className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-100 flex items-center gap-2"
+                                >
+                                    <Settings className="w-4 h-4" />
+                                    Form Setup
+                                </Link>
+                            </div>
                             <button onClick={() => setShowCustomizeModal(false)} className="text-gray-400 hover:text-gray-600">
                                 <X className="w-5 h-5" />
                             </button>
@@ -495,7 +697,7 @@ export default function RequestForm({ currentUser }: Props) {
                                 { id: 'department', label: 'Department', required: true },
                                 { id: 'priority', label: 'Priority', required: false },
                                 { id: 'dueDate', label: 'Due Date', required: true },
-                                { id: 'estimatedHours', label: 'Estimated Hours', required: false },
+                                { id: 'estimatedHours', label: 'Estimated Hours to complete', required: false },
                                 { id: 'tags', label: 'Tags', required: false },
                                 { id: 'deliverableCount', label: 'Deliverable Quantity', required: false },
                                 { id: 'targetAudience', label: 'Target Audience', required: false },
@@ -528,7 +730,7 @@ export default function RequestForm({ currentUser }: Props) {
                                 Configure custom fields that appear based on the selected work category.
                             </p>
 
-                            <select className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm mb-3">
+                            <select className="w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg text-sm mb-3">
                                 <option>Select a category to configure</option>
                                 {workCategories.map(cat => (
                                     <option key={cat.id}>{cat.name}</option>
@@ -549,7 +751,7 @@ export default function RequestForm({ currentUser }: Props) {
                             </button>
                             <button
                                 onClick={() => {
-                                    alert('Form configuration saved!');
+                                    toast.success('Form configuration saved!');
                                     setShowCustomizeModal(false);
                                 }}
                                 className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"

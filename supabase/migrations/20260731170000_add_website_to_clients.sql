@@ -1,0 +1,3 @@
+ALTER TABLE clients
+ADD COLUMN IF NOT EXISTS website text,
+ADD COLUMN IF NOT EXISTS favicon text;

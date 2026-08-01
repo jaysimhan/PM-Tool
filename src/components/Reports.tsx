@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { User } from '../types/types';
 import { tasks, teams, users, clients, workCategories } from '../data/mockData';
 import { BarChart3, Download, Calendar, TrendingUp, Users as UsersIcon, CheckCircle } from 'lucide-react';
+import TeamDashboard from './TeamDashboard';
 
 interface Props {
     currentUser: User;
@@ -9,6 +10,14 @@ interface Props {
 
 export default function Reports({ currentUser }: Props) {
     const [dateRange, setDateRange] = useState('this-month');
+    const [activeTab, setActiveTab] = useState<'reports' | 'team'>('reports');
+
+    const hasTeam = useMemo(() => {
+        if (currentUser.role === 'team_leader') {
+            return teams.some(t => t.leaderId === currentUser.id);
+        }
+        return teams.some(t => t.memberIds.includes(currentUser.id));
+    }, [currentUser]);
 
     // Calculate statistics
     const stats = {
@@ -118,31 +127,63 @@ export default function Reports({ currentUser }: Props) {
     return (
         <div className="space-y-6">
             {/* Header */}
-            <div className="flex items-center justify-between">
-                <div>
-                    <h1 className="text-2xl font-semibold text-gray-900">Reports & Analytics</h1>
-                    <p className="text-sm text-gray-600 mt-1">Insights into team performance and capacity</p>
+            <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h1 className="text-2xl font-semibold text-gray-900">Reports & Analytics</h1>
+                        <p className="text-sm text-gray-600 mt-1">Insights into team performance and capacity</p>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <select
+                            value={dateRange}
+                            onChange={(e) => setDateRange(e.target.value)}
+                            className="pl-3 pr-8 py-2 border border-gray-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all cursor-pointer"
+                        >
+                            <option value="this-week">This Week</option>
+                            <option value="this-month">This Month</option>
+                            <option value="last-month">Last Month</option>
+                            <option value="this-quarter">This Quarter</option>
+                            <option value="all-time">All Time</option>
+                        </select>
+                    </div>
                 </div>
 
-                <div className="flex items-center gap-3">
-                    <select
-                        value={dateRange}
-                        onChange={(e) => setDateRange(e.target.value)}
-                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                    >
-                        <option value="this-week">This Week</option>
-                        <option value="this-month">This Month</option>
-                        <option value="last-month">Last Month</option>
-                        <option value="this-quarter">This Quarter</option>
-                        <option value="all-time">All Time</option>
-                    </select>
-
-                </div>
+                {hasTeam && (
+                    <div className="border-b border-gray-200">
+                        <nav className="-mb-px flex space-x-8">
+                            <button
+                                onClick={() => setActiveTab('reports')}
+                                className={`${
+                                    activeTab === 'reports'
+                                        ? 'border-blue-500 text-blue-600'
+                                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}
+                            >
+                                Organization Reports
+                            </button>
+                            <button
+                                onClick={() => setActiveTab('team')}
+                                className={`${
+                                    activeTab === 'team'
+                                        ? 'border-blue-500 text-blue-600'
+                                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}
+                            >
+                                My Team Dashboard
+                            </button>
+                        </nav>
+                    </div>
+                )}
             </div>
 
-            {/* Key Metrics */}
-            <div className="grid grid-cols-5 gap-4">
-                <div className="bg-white rounded-lg border border-gray-200 p-5">
+            {activeTab === 'team' ? (
+                <TeamDashboard currentUser={currentUser} />
+            ) : (
+                <>
+                    {/* Key Metrics */}
+                    <div className="grid grid-cols-5 gap-4">
+                        <div className="bg-white rounded-lg border border-gray-200 p-5">
                     <div className="text-sm text-gray-600 mb-1">Total Requests</div>
                     <div className="text-2xl font-semibold text-gray-900">{stats.totalTasks}</div>
                 </div>
@@ -329,6 +370,8 @@ export default function Reports({ currentUser }: Props) {
                     </table>
                 </div>
             </div>
+            </>
+            )}
         </div>
     );
 }

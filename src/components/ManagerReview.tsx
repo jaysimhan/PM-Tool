@@ -3,6 +3,7 @@ import { User } from '../types/types';
 import { tasks, users, clients, workCategories, teams } from '../data/mockData';
 import { AlertTriangle, UserCheck, Calendar, TrendingUp } from 'lucide-react';
 import { getPriorityColor, getStatusBadgeColor, formatStatusLabel } from '../utils/capacityCalculations';
+import toast from 'react-hot-toast';
 
 interface Props {
   currentUser: User;
@@ -68,15 +69,15 @@ export default function ManagerReview({ currentUser }: Props) {
 
   const handleAssignTask = (taskId: string, userId: string) => {
     console.log('Assigning task', taskId, 'to user', userId);
-    alert(`Task would be assigned to ${users.find(u => u.id === userId)?.name}`);
+    toast.success(`Task would be assigned to ${users.find(u => u.id === userId)?.name}`);
   };
 
   const handleChangeDeadline = (taskId: string) => {
-    alert('This would open a dialog to change the deadline');
+    toast('This would open a dialog to change the deadline');
   };
 
   const handleSplitTask = (taskId: string) => {
-    alert('This would open a dialog to split the task into multiple subtasks');
+    toast('This would open a dialog to split the task into multiple subtasks');
   };
 
   return (

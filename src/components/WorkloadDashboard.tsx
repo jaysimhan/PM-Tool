@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { User, Task } from '../types/types';
-import { users, teams, tasks, leaves, clients, workCategories } from '../data/mockData';
+import { useData } from '../contexts/DataContext';
 import { calculateDailyCapacity, getDatesInRange, formatDate, getWorkloadColor, getStatusBadgeColor, formatStatusLabel, getPriorityColor } from '../utils/capacityCalculations';
 import { Filter, Download, Calendar, List, LayoutGrid, GanttChart, ArrowUpDown } from 'lucide-react';
 import TaskDetailsPanel from './TaskDetailsPanel';
@@ -15,7 +15,12 @@ type CalendarView = 'day' | 'week' | 'month';
 type SortOption = 'dueDate' | 'priority' | 'assignee' | 'status' | 'hours' | 'employee';
 
 export default function WorkloadDashboard({ currentUser }: Props) {
+    const { users, teams, tasks, leaves, clients, regions, allTags, workCategories } = useData();
     const [localTasks, setLocalTasks] = useState(tasks);
+    
+    useEffect(() => {
+        setLocalTasks(tasks);
+    }, [tasks]);
     const [selectedTeamId, setSelectedTeamId] = useState<string>('all');
     const [startDate] = useState(() => new Date().toISOString().split('T')[0]);
     const [hoveredCell, setHoveredCell] = useState<{ userId: string; date: string } | null>(null);
@@ -32,7 +37,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
     // Filter states
     const [filterPriority, setFilterPriority] = useState<string[]>([]);
     const [filterStatus, setFilterStatus] = useState<string[]>([]);
-    const [filterCategory, setFilterCategory] = useState<string[]>([]);
+    const [filterBrand, setFilterBrand] = useState<string[]>([]);
+    const [filterRegion, setFilterRegion] = useState<string[]>([]);
+    const [filterTag, setFilterTag] = useState<string[]>([]);
 
     // Get dates to display
     const dates = useMemo(() => {
@@ -64,19 +71,32 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         return allDates;
     }, [startDate, calendarView, showWeekends]);
 
+    // Visible teams based on user role
+    const visibleTeams = useMemo(() => {
+        if (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager') {
+            return teams;
+        }
+        if (currentUser.role === 'team_leader') {
+            return teams.filter(t => t.leaderId === currentUser.id);
+        }
+        return teams.filter(t => t.memberIds && t.memberIds.includes(currentUser.id));
+    }, [currentUser, teams]);
+
     // Get team members based on selected team
     const teamMembers = useMemo(() => {
         if (selectedTeamId === 'all') {
+            const visibleTeamIds = visibleTeams.map(t => t.id);
             return users.filter(u =>
                 u.role !== 'requester' &&
                 u.isActive &&
-                (u.teamIds.length > 0 || tasks.some(t => t.assignedToId === u.id))
+                ((u.teamIds && u.teamIds.length > 0) || tasks.some(t => t.assignedToId === u.id)) &&
+                (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager' || (u.teamIds && u.teamIds.some(tid => visibleTeamIds.includes(tid))) || u.id === currentUser.id)
             );
         }
 
         const team = teams.find(t => t.id === selectedTeamId);
-        return team ? users.filter(u => team.memberIds.includes(u.id)) : [];
-    }, [selectedTeamId]);
+        return team ? users.filter(u => team.memberIds && team.memberIds.includes(u.id)) : [];
+    }, [selectedTeamId, visibleTeams, users, tasks, currentUser]);
 
     // Calculate capacity for each user and date
     const capacityData = useMemo(() => {
@@ -109,33 +129,25 @@ export default function WorkloadDashboard({ currentUser }: Props) {
     const userTeamMap = useMemo(() => {
         const map = new Map<string, typeof teams[0] | null>();
         users.forEach(user => {
-            if (user.teamIds.length === 0) {
+            if (!user.teamIds || user.teamIds.length === 0) {
                 map.set(user.id, null);
             } else {
                 map.set(user.id, teams.find(t => t.id === user.teamIds[0]) || null);
             }
         });
         return map;
-    }, []);
+    }, [users, teams]);
 
     const getUserTeam = (userId: string) => userTeamMap.get(userId) || null;
 
-    // Visible teams based on user role
-    const visibleTeams = useMemo(() => {
-        if (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager') {
-            return teams;
-        }
-        if (currentUser.role === 'team_leader') {
-            return teams.filter(t => t.leaderId === currentUser.id);
-        }
-        return teams.filter(t => t.memberIds.includes(currentUser.id));
-    }, [currentUser]);
-
     // Get all active tasks for board/list views with filters
     const activeTasks = useMemo(() => {
+        const visibleTeamIds = visibleTeams.map(t => t.id);
         let filtered = localTasks.filter(t =>
             (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted' || t.status === 'on_hold') &&
-            (selectedTeamId === 'all' || t.teamIds.includes(selectedTeamId))
+            (selectedTeamId === 'all' 
+                ? (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager' || (t.teamIds && t.teamIds.some(tid => visibleTeamIds.includes(tid))) || t.assignedToId === currentUser.id)
+                : (t.teamIds && t.teamIds.includes(selectedTeamId)))
         );
 
         // Apply filters
@@ -145,8 +157,14 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         if (filterStatus.length > 0) {
             filtered = filtered.filter(t => filterStatus.includes(t.status));
         }
-        if (filterCategory.length > 0) {
-            filtered = filtered.filter(t => filterCategory.includes(t.categoryId));
+        if (filterBrand.length > 0) {
+            filtered = filtered.filter(t => filterBrand.includes(t.clientId));
+        }
+        if (filterRegion.length > 0) {
+            filtered = filtered.filter(t => t.regionId && filterRegion.includes(t.regionId));
+        }
+        if (filterTag.length > 0) {
+            filtered = filtered.filter(t => t.tags && t.tags.some(tag => filterTag.includes(tag.id)));
         }
 
         // Apply sorting for list view
@@ -185,7 +203,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         }
 
         return filtered;
-    }, [selectedTeamId, filterPriority, filterStatus, filterCategory, sortBy, sortDirection, viewMode]);
+    }, [selectedTeamId, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, sortBy, sortDirection, viewMode]);
 
     const handleTaskClick = (task: Task) => {
         setSelectedTask(task);
@@ -795,9 +813,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                     >
                         <Filter className="w-4 h-4" />
                         Filters
-                        {(filterPriority.length + filterStatus.length + filterCategory.length > 0) && (
-                            <span className="ml-1 px-1.5 py-0.5 bg-blue-500 text-white text-xs rounded-full">
-                                {filterPriority.length + filterStatus.length + filterCategory.length}
+                        {(filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length > 0) && (
+                            <span className="bg-blue-100 text-blue-700 py-0.5 px-2 rounded-full text-xs">
+                                {filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length}
                             </span>
                         )}
                     </button>
@@ -846,7 +864,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
             {/* Filters Panel */}
             {showFilters && (
                 <div className="bg-white rounded-lg border border-gray-200 p-4">
-                    <div className="grid grid-cols-3 gap-6">
+                    <div className="grid grid-cols-5 gap-6">
                         <div>
                             <label className="text-sm font-medium text-gray-700 mb-2 block">Priority</label>
                             <div className="space-y-2">
@@ -894,23 +912,69 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                         </div>
 
                         <div>
-                            <label className="text-sm font-medium text-gray-700 mb-2 block">Category</label>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Brand</label>
                             <div className="space-y-2 max-h-32 overflow-y-auto">
-                                {workCategories.slice(0, 5).map(category => (
-                                    <label key={category.id} className="flex items-center gap-2">
+                                {clients.map(brand => (
+                                    <label key={brand.id} className="flex items-center gap-2">
                                         <input
                                             type="checkbox"
-                                            checked={filterCategory.includes(category.id)}
+                                            checked={filterBrand.includes(brand.id)}
                                             onChange={(e) => {
                                                 if (e.target.checked) {
-                                                    setFilterCategory([...filterCategory, category.id]);
+                                                    setFilterBrand([...filterBrand, brand.id]);
                                                 } else {
-                                                    setFilterCategory(filterCategory.filter(c => c !== category.id));
+                                                    setFilterBrand(filterBrand.filter(c => c !== brand.id));
                                                 }
                                             }}
                                             className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                                         />
-                                        <span className="text-sm text-gray-700">{category.name}</span>
+                                        <span className="text-sm text-gray-700">{brand.name}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Region</label>
+                            <div className="space-y-2 max-h-32 overflow-y-auto">
+                                {regions.map(region => (
+                                    <label key={region.id} className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={filterRegion.includes(region.id)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setFilterRegion([...filterRegion, region.id]);
+                                                } else {
+                                                    setFilterRegion(filterRegion.filter(r => r !== region.id));
+                                                }
+                                            }}
+                                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <span className="text-sm text-gray-700">{region.name}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Tags</label>
+                            <div className="space-y-2 max-h-32 overflow-y-auto">
+                                {allTags.map(tag => (
+                                    <label key={tag.id} className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={filterTag.includes(tag.id)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setFilterTag([...filterTag, tag.id]);
+                                                } else {
+                                                    setFilterTag(filterTag.filter(t => t !== tag.id));
+                                                }
+                                            }}
+                                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <span className="text-sm text-gray-700">{tag.name}</span>
                                     </label>
                                 ))}
                             </div>
@@ -922,7 +986,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                             onClick={() => {
                                 setFilterPriority([]);
                                 setFilterStatus([]);
-                                setFilterCategory([]);
+                                setFilterBrand([]);
+                                setFilterRegion([]);
+                                setFilterTag([]);
                             }}
                             className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900"
                         >

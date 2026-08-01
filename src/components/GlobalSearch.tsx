@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, User as UserIcon, Tag, CheckSquare, X, CheckCircle2, ClipboardList, Users, Folder, Triangle, MoreHorizontal, Clock, Trash2, Zap, MoreVertical, Globe } from 'lucide-react';
+import { Search, User as UserIcon, Tag, CheckSquare, X, CheckCircle2, ClipboardList, Users, Folder, Triangle, MoreHorizontal, Clock, Trash2, Zap, MoreVertical, Globe, MapPin } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
 
 export function GlobalSearch({ isMac }: { isMac: boolean }) {
-    const { tasks, users } = useData();
+    const { tasks, users, regions } = useData();
     const [query, setQuery] = useState('');
     const [isOpen, setIsOpen] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -111,6 +111,9 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                                 <Globe className="w-4 h-4" /> Brand
                             </button>
                             <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
+                                <MapPin className="w-4 h-4" /> Region
+                            </button>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 hover:bg-gray-50 text-sm text-gray-700 font-medium whitespace-nowrap transition-colors">
                                 <Tag className="w-4 h-4" /> Tag
                             </button>
                         </div>
@@ -120,7 +123,13 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                             {hasQuery ? (
                                 <>
                                     <div className="px-4 py-2 text-sm font-semibold text-gray-500">Tasks</div>
-                                    {tasks.filter(t => t.title.toLowerCase().includes(normalizedQuery) || (t.tags && t.tags.some(tag => tag.name.toLowerCase().includes(normalizedQuery)))).slice(0, 10).map(task => (
+                                    {tasks.filter(t => {
+                                        const regionName = t.regionId ? regions.find(r => r.id === t.regionId)?.name.toLowerCase() : null;
+                                        const regionMatch = regionName ? regionName.includes(normalizedQuery) : false;
+                                        return t.title.toLowerCase().includes(normalizedQuery) || 
+                                               (t.tags && t.tags.some(tag => tag.name.toLowerCase().includes(normalizedQuery))) ||
+                                               regionMatch;
+                                    }).slice(0, 10).map(task => (
                                         <button key={task.id} onClick={handleSelect} className="w-full text-left px-4 py-2.5 hover:bg-gray-50 flex items-center justify-between group">
                                             <div className="flex items-center gap-4">
                                                 <div className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center text-gray-500">
@@ -130,12 +139,24 @@ export function GlobalSearch({ isMac }: { isMac: boolean }) {
                                                     <div className="text-sm text-gray-900 font-medium">{task.title}</div>
                                                     <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
                                                         {task.status.replace('_', ' ')}
+                                                        {task.regionId && regions.find(r => r.id === task.regionId) && (
+                                                            <>
+                                                                <span className="mx-1">•</span>
+                                                                <span>{regions.find(r => r.id === task.regionId)?.flag} {regions.find(r => r.id === task.regionId)?.name}</span>
+                                                            </>
+                                                        )}
                                                     </div>
                                                 </div>
                                             </div>
                                         </button>
                                     ))}
-                                    {tasks.filter(t => t.title.toLowerCase().includes(normalizedQuery) || (t.tags && t.tags.some(tag => tag.name.toLowerCase().includes(normalizedQuery)))).length === 0 && (
+                                    {tasks.filter(t => {
+                                        const regionName = t.regionId ? regions.find(r => r.id === t.regionId)?.name.toLowerCase() : null;
+                                        const regionMatch = regionName ? regionName.includes(normalizedQuery) : false;
+                                        return t.title.toLowerCase().includes(normalizedQuery) || 
+                                               (t.tags && t.tags.some(tag => tag.name.toLowerCase().includes(normalizedQuery))) ||
+                                               regionMatch;
+                                    }).length === 0 && (
                                         <div className="px-4 py-3 text-sm text-gray-500 text-center">No tasks found.</div>
                                     )}
                                 </>

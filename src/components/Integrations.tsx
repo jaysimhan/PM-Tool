@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User } from '../types/types';
 import { Settings, Link as LinkIcon, Unlink, Save, CheckCircle2, AlertCircle } from 'lucide-react';
-
+import { useConfirm } from '../contexts/ConfirmContext';
 interface Props {
   currentUser: User;
 }
@@ -43,15 +43,17 @@ export default function Integrations({ currentUser }: Props) {
     }, 1000);
   };
 
+  const { confirm } = useConfirm();
+
   const handleDisconnect = () => {
-    if (confirm('Are you sure you want to disconnect from Asana? Automated syncing will stop.')) {
+    confirm('Are you sure you want to disconnect from Asana? Automated syncing will stop.', () => {
       localStorage.removeItem('ASANA_ACCESS_TOKEN');
       localStorage.removeItem('ASANA_WORKSPACE_GID');
       setAccessToken('');
       setWorkspaceGid('');
       setIsConnected(false);
       setStatusMessage({ type: 'success', text: 'Disconnected from Asana.' });
-    }
+    });
   };
 
   if (currentUser.role !== 'super_admin' && currentUser.role !== 'admin') {

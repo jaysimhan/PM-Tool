@@ -9,4 +9,4 @@ envFile.split('\n').forEach(line => {
   }
 });
 const supabase = createClient(env['VITE_SUPABASE_URL'], env['VITE_SUPABASE_ANON_KEY']);
-supabase.from('tasks').select('*').limit(1).then(res => console.log(Object.keys(res.data[0])));
+supabase.rpc('get_table_columns', { table_name: 'tasks' }).then(res => console.log(res));

@@ -1,11 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { User, Task } from '../types/types';
-import { users, teams, tasks, clients, workCategories } from '../data/mockData';
+import { useData } from '../contexts/DataContext';
 import { ChevronLeft, ChevronRight, ChevronDown, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
 import { getPriorityColor, getStatusBadgeColor, formatStatusLabel, getDatesInRange } from '../utils/capacityCalculations';
 import TaskDetailsPanel from './TaskDetailsPanel';
 import { TimelineContainer } from './TimelineContainer';
+import { getTagStyle } from '../utils/colors';
 
 interface Props {
   currentUser: User;
@@ -16,9 +17,10 @@ type TaskPageMode = 'calendar' | 'list' | 'board' | 'timeline';
 type SortOption = 'dueDate' | 'priority' | 'assignee' | 'status' | 'hours' | 'employee';
 
 export default function CalendarView({ currentUser }: Props) {
+  const { users, teams, tasks, clients, regions, allTags, workCategories } = useData();
   const navigate = useNavigate();
   const [currentDate, setCurrentDate] = useState(new Date('2026-07-28'));
-  const [pageMode, setPageMode] = useState<TaskPageMode>('calendar');
+  const [pageMode, setPageMode] = useState<TaskPageMode>('list');
   const [viewMode, setViewMode] = useState<CalendarView>('month');
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
 
@@ -66,6 +68,9 @@ export default function CalendarView({ currentUser }: Props) {
   const [filterTeam, setFilterTeam] = useState<string>('all');
   const [filterPriority, setFilterPriority] = useState<string[]>([]);
   const [filterStatus, setFilterStatus] = useState<string[]>([]);
+  const [filterBrand, setFilterBrand] = useState<string[]>([]);
+  const [filterRegion, setFilterRegion] = useState<string[]>([]);
+  const [filterTag, setFilterTag] = useState<string[]>([]);
 
   // Visible teams based on user role
   const visibleTeams = useMemo(() => {
@@ -80,19 +85,36 @@ export default function CalendarView({ currentUser }: Props) {
 
   // Filter tasks
   const filteredTasks = useMemo(() => {
+    const visibleTeamIds = visibleTeams.map(t => t.id);
     let filtered = tasks.filter(t => 
       t.status !== 'completed' && 
       t.status !== 'cancelled'
     );
 
     if (filterTeam !== 'all') {
-      filtered = filtered.filter(t => t.teamIds.includes(filterTeam));
+      filtered = filtered.filter(t => t.teamIds && t.teamIds.includes(filterTeam));
+    } else {
+      if (currentUser.role !== 'super_admin' && currentUser.role !== 'admin' && currentUser.role !== 'manager') {
+        filtered = filtered.filter(t => 
+          (t.teamIds && t.teamIds.some(tid => visibleTeamIds.includes(tid))) || 
+          t.assignedToId === currentUser.id
+        );
+      }
     }
     if (filterPriority.length > 0) {
       filtered = filtered.filter(t => t.priority && filterPriority.includes(t.priority));
     }
     if (filterStatus.length > 0) {
       filtered = filtered.filter(t => filterStatus.includes(t.status));
+    }
+    if (filterBrand.length > 0) {
+      filtered = filtered.filter(t => filterBrand.includes(t.clientId));
+    }
+    if (filterRegion.length > 0) {
+      filtered = filtered.filter(t => t.regionId && filterRegion.includes(t.regionId));
+    }
+    if (filterTag.length > 0) {
+      filtered = filtered.filter(t => t.tags && t.tags.some(tag => filterTag.includes(tag.id)));
     }
 
     if (pageMode === 'list') {
@@ -124,7 +146,7 @@ export default function CalendarView({ currentUser }: Props) {
     }
 
     return filtered;
-  }, [filterTeam, filterPriority, filterStatus, pageMode, sortBy, sortDirection]);
+  }, [filterTeam, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, pageMode, sortBy, sortDirection]);
 
   const handleTaskClick = (task: Task) => {
     setSelectedTask(task);
@@ -698,7 +720,11 @@ export default function CalendarView({ currentUser }: Props) {
               <td className="px-4 py-3">
                   <div className="flex items-center gap-1 flex-wrap">
                       {task.tags && task.tags.map((tag, idx) => (
-                          <span key={tag.id || idx} className={`px-2 py-0.5 text-[10px] rounded-full ${tag.color || 'bg-gray-100 text-gray-700'}`}>
+                          <span 
+                              key={tag.id || idx} 
+                              className={`px-2 py-0.5 text-[10px] rounded-full font-medium ${getTagStyle(tag.color).className}`}
+                              style={getTagStyle(tag.color).style}
+                          >
                               {tag.name}
                           </span>
                       ))}
@@ -882,31 +908,31 @@ export default function CalendarView({ currentUser }: Props) {
         </div>
         
         <div className="flex items-center gap-3">
-          <div className="flex items-center p-1 bg-[#F8F9FA] rounded-xl">
-              <button
-                  onClick={() => setPageMode('calendar')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'calendar' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
-                  title="Calendar View"
-              >
-                  <Calendar className="w-5 h-5" strokeWidth={1.5} />
-              </button>
+          <div className="flex items-center p-1 bg-gray-100 rounded-xl">
               <button
                   onClick={() => setPageMode('list')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'list' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
+                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'list' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
                   title="List View"
               >
                   <List className="w-5 h-5" strokeWidth={1.5} />
               </button>
               <button
                   onClick={() => setPageMode('board')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'board' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
+                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'board' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
                   title="Board View"
               >
                   <LayoutGrid className="w-5 h-5" strokeWidth={1.5} />
               </button>
               <button
+                  onClick={() => setPageMode('calendar')}
+                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'calendar' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
+                  title="Calendar View"
+              >
+                  <Calendar className="w-5 h-5" strokeWidth={1.5} />
+              </button>
+              <button
                   onClick={() => setPageMode('timeline')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'timeline' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
+                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'timeline' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
                   title="Timeline View"
               >
                   <GanttChart className="w-5 h-5" strokeWidth={1.5} />
@@ -921,6 +947,11 @@ export default function CalendarView({ currentUser }: Props) {
           >
             <Filter className="w-4 h-4" />
             Filters
+            {(filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length > 0) && (
+                <span className="bg-blue-100 text-blue-700 py-0.5 px-2 rounded-full text-xs">
+                    {filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length}
+                </span>
+            )}
           </button>
           <button 
             onClick={handleNewTask}
@@ -967,7 +998,7 @@ export default function CalendarView({ currentUser }: Props) {
       {/* Filters Panel */}
       {showFilters && (
         <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="grid grid-cols-3 gap-6">
+          <div className="grid grid-cols-6 gap-6">
             <div>
               <label className="text-sm font-medium text-gray-700 mb-2 block">Team</label>
               <select
@@ -1027,6 +1058,75 @@ export default function CalendarView({ currentUser }: Props) {
                 ))}
               </div>
             </div>
+
+            <div>
+              <label className="text-sm font-medium text-gray-700 mb-2 block">Brand</label>
+              <div className="space-y-2 max-h-32 overflow-y-auto">
+                {clients.map(brand => (
+                  <label key={brand.id} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={filterBrand.includes(brand.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setFilterBrand([...filterBrand, brand.id]);
+                        } else {
+                          setFilterBrand(filterBrand.filter(c => c !== brand.id));
+                        }
+                      }}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-gray-700">{brand.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium text-gray-700 mb-2 block">Region</label>
+              <div className="space-y-2 max-h-32 overflow-y-auto">
+                {regions.map(region => (
+                  <label key={region.id} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={filterRegion.includes(region.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setFilterRegion([...filterRegion, region.id]);
+                        } else {
+                          setFilterRegion(filterRegion.filter(r => r !== region.id));
+                        }
+                      }}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-gray-700">{region.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium text-gray-700 mb-2 block">Tags</label>
+              <div className="space-y-2 max-h-32 overflow-y-auto">
+                {allTags.map(tag => (
+                  <label key={tag.id} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={filterTag.includes(tag.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setFilterTag([...filterTag, tag.id]);
+                        } else {
+                          setFilterTag(filterTag.filter(t => t !== tag.id));
+                        }
+                      }}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-gray-700">{tag.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className="mt-4 pt-4 border-t border-gray-200 flex items-center justify-end">
@@ -1035,6 +1135,9 @@ export default function CalendarView({ currentUser }: Props) {
                 setFilterTeam('all');
                 setFilterPriority([]);
                 setFilterStatus([]);
+                setFilterBrand([]);
+                setFilterRegion([]);
+                setFilterTag([]);
               }}
               className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900"
             >

@@ -1,15 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { User } from '../types/types';
-import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon } from 'lucide-react';
+import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon, Edit2, Trash2, Shield } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
 import { supabase, supabaseAdmin } from '../lib/supabaseClient';
-
+import toast from 'react-hot-toast';
+import { useConfirm } from '../contexts/ConfirmContext';
 interface Props {
     currentUser: User;
 }
 
 export default function TeamManagement({ currentUser }: Props) {
-    const { users, teams, skills, refreshTeams } = useData();
+    const { users, teams, skills, refreshTeams, refreshSkills, refreshUsers } = useData();
+    const { confirm } = useConfirm();
     const [selectedTeam, setSelectedTeam] = useState<string>(teams[0]?.id || '');
     const [showInviteMember, setShowInviteMember] = useState(false);
     const [inviteSearch, setInviteSearch] = useState('');
@@ -25,6 +27,16 @@ export default function TeamManagement({ currentUser }: Props) {
     const [editTeamName, setEditTeamName] = useState('');
     const [editTeamDesc, setEditTeamDesc] = useState('');
     const [editTeamColor, setEditTeamColor] = useState('');
+    const [editTeamLeaderId, setEditTeamLeaderId] = useState('');
+    const [showManageSkills, setShowManageSkills] = useState(false);
+    const [manageSkillsSearch, setManageSkillsSearch] = useState('');
+    const [newSkillName, setNewSkillName] = useState('');
+    const [newSkillCategory, setNewSkillCategory] = useState('General');
+    const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
+    const [editSkillName, setEditSkillName] = useState('');
+    const [editSkillCategory, setEditSkillCategory] = useState('');
+    const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
+    const [editingMemberRole, setEditingMemberRole] = useState('');
 
     useEffect(() => {
         if (!selectedTeam && teams.length > 0) {
@@ -41,7 +53,7 @@ export default function TeamManagement({ currentUser }: Props) {
 
     const handleRemoveMember = async (userId: string) => {
         if (!team) return;
-        if (confirm('Are you sure you want to remove this member?')) {
+        confirm('Are you sure you want to remove this member?', async () => {
             const { error } = await supabase
                 .from('team_members')
                 .delete()
@@ -50,10 +62,25 @@ export default function TeamManagement({ currentUser }: Props) {
             
             if (error) {
                 console.error('Error removing member:', error);
-                alert('Error removing member.');
+                toast.error('Error removing member.');
             } else {
                 await refreshTeams();
+                if (refreshUsers) await refreshUsers();
+                toast.success('Member removed.');
             }
+        });
+    };
+
+    const handleSaveMemberRole = async (userId: string) => {
+        if (!editingMemberRole) return;
+        const { error } = await supabase.from('users').update({ role: editingMemberRole }).eq('id', userId);
+        if (error) {
+            console.error('Error updating user role:', error);
+            toast.error('Error updating user role.');
+        } else {
+            if (refreshUsers) await refreshUsers();
+            setEditingMemberId(null);
+            toast.success('Role updated.');
         }
     };
 
@@ -85,28 +112,38 @@ export default function TeamManagement({ currentUser }: Props) {
             });
         }
 
+        const generatedLinks: { email: string, link: string }[] = [];
+
         for (const user of inviteesToProcess) {
             let userId = user.id;
 
             // If the user ID starts with temp-, they are a new user that needs to be invited via Supabase Auth
             if (userId.startsWith('temp-')) {
-                const { data, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(user.email, {
-                    data: {
-                        name: user.name,
+                // Since SMTP is not configured, generate the invite link instead of sending an email
+                const { data, error: inviteError } = await supabaseAdmin.auth.admin.generateLink({
+                    type: 'invite',
+                    email: user.email,
+                    options: {
+                        data: {
+                            name: user.name,
+                        }
                     }
                 });
                 
                 if (inviteError) {
-                    console.error('Error inviting user via Supabase:', inviteError);
+                    console.error('Error generating invite link via Supabase:', inviteError);
                     const errorMsg = inviteError.message && Object.keys(inviteError.message).length > 0
                         ? inviteError.message
-                        : `Status ${inviteError.status || 'Unknown'} - Please check your Supabase SMTP settings.`;
-                    alert(`Failed to send invite email to ${user.email}: ${errorMsg}`);
+                        : `Status ${inviteError.status || 'Unknown'} - Please check your Supabase settings.`;
+                    toast.error(`Failed to generate invite link for ${user.email}: ${errorMsg}`);
                     continue; // Skip adding to team if invite failed
                 }
                 
                 if (data && data.user) {
                     userId = data.user.id; // Get the real Supabase Auth user ID
+                    if (data.properties?.action_link) {
+                        generatedLinks.push({ email: user.email, link: data.properties.action_link });
+                    }
                 }
             }
 
@@ -122,11 +159,17 @@ export default function TeamManagement({ currentUser }: Props) {
         }
         
         if (successfulInvites > 0) {
-            let alertMsg = `Successfully added and sent invitations to ${successfulInvites} user(s).`;
+            let alertMsg = `Successfully added ${successfulInvites} user(s).`;
             if (inviteMessage.trim()) {
                 alertMsg += `\n\nMessage included:\n${inviteMessage}`;
             }
-            alert(alertMsg);
+            if (generatedLinks.length > 0) {
+                alertMsg += `\n\nSince SMTP is disabled, please send these invite links manually to the users:\n\n`;
+                generatedLinks.forEach(gl => {
+                    alertMsg += `${gl.email}: ${gl.link}\n`;
+                });
+            }
+            toast.success(alertMsg, { duration: 5000 });
         }
         
         await refreshTeams();
@@ -140,7 +183,7 @@ export default function TeamManagement({ currentUser }: Props) {
         if (!team) return;
         const link = `${window.location.origin}/team/invite/${team.id}`;
         navigator.clipboard.writeText(link);
-        alert('Invite link copied to clipboard: ' + link);
+        toast.success('Invite link copied to clipboard');
     };
 
     const handleCreateTeam = async () => {
@@ -157,7 +200,7 @@ export default function TeamManagement({ currentUser }: Props) {
         
         if (error) {
             console.error('Error creating team:', error);
-            alert('Error creating team.');
+            toast.error('Error creating team.');
         } else {
             await refreshTeams();
             setShowCreateTeam(false);
@@ -166,6 +209,7 @@ export default function TeamManagement({ currentUser }: Props) {
             if (data && data[0]) {
                 setSelectedTeam(data[0].id);
             }
+            toast.success('Team created.');
         }
     };
     const handleOpenEditTeam = () => {
@@ -173,6 +217,7 @@ export default function TeamManagement({ currentUser }: Props) {
         setEditTeamName(team.name);
         setEditTeamDesc(team.description);
         setEditTeamColor(team.color);
+        setEditTeamLeaderId(team.leaderId || '');
         setShowEditTeam(true);
     };
 
@@ -183,16 +228,80 @@ export default function TeamManagement({ currentUser }: Props) {
             .update({
                 name: editTeamName,
                 description: editTeamDesc,
-                color: editTeamColor
+                color: editTeamColor,
+                leader_id: editTeamLeaderId || null
             })
             .eq('id', team.id);
         
         if (error) {
             console.error('Error updating team:', error);
-            alert('Error updating team.');
+            toast.error('Error updating team.');
         } else {
             await refreshTeams();
             setShowEditTeam(false);
+            toast.success('Team updated.');
+        }
+    };
+
+    const handleToggleTeamSkill = async (skillId: string) => {
+        if (!team) return;
+        const isSelected = team.skillIds.includes(skillId);
+        if (isSelected) {
+            await supabase.from('team_skills').delete().eq('team_id', team.id).eq('skill_id', skillId);
+        } else {
+            await supabase.from('team_skills').insert({ team_id: team.id, skill_id: skillId });
+        }
+        await refreshTeams();
+    };
+
+    const handleCreateNewSkill = async () => {
+        if (!newSkillName.trim() || !team) return;
+        const { data, error } = await supabase.from('skills').insert({
+            name: newSkillName.trim(),
+            category: newSkillCategory
+        }).select();
+        
+        if (error) {
+            console.error('Error creating skill:', error);
+            toast.error('Error creating skill.');
+            return;
+        }
+        if (data && data[0]) {
+            if (refreshSkills) await refreshSkills();
+            await supabase.from('team_skills').insert({ team_id: team.id, skill_id: data[0].id });
+            await refreshTeams();
+            setNewSkillName('');
+            toast.success('Skill created.');
+        }
+    };
+
+    const handleDeleteSkill = async (skillId: string) => {
+        confirm('Are you sure you want to delete this skill globally?', async () => {
+            const { error } = await supabase.from('skills').delete().eq('id', skillId);
+            if (error) {
+                console.error('Error deleting skill:', error);
+                toast.error('Error deleting skill.');
+            } else {
+                if (refreshSkills) await refreshSkills();
+                await refreshTeams();
+                toast.success('Skill deleted.');
+            }
+        });
+    };
+
+    const handleSaveEditSkill = async (skillId: string) => {
+        if (!editSkillName.trim()) return;
+        const { error } = await supabase.from('skills').update({
+            name: editSkillName.trim(),
+            category: editSkillCategory
+        }).eq('id', skillId);
+        if (error) {
+            console.error('Error updating skill:', error);
+            toast.error('Error updating skill.');
+        } else {
+            if (refreshSkills) await refreshSkills();
+            setEditingSkillId(null);
+            toast.success('Skill updated.');
         }
     };
 
@@ -363,16 +472,53 @@ export default function TeamManagement({ currentUser }: Props) {
                                             </div>
 
                                             <div className="flex items-center gap-2 ml-4">
-                                                <button className="px-3 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50">
-                                                    Edit
-                                                </button>
-                                                {!isLeader && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
-                                                    <button
-                                                        onClick={() => handleRemoveMember(member.id)}
-                                                        className="px-3 py-1 border border-red-300 text-red-700 rounded text-xs hover:bg-red-50"
-                                                    >
-                                                        Remove
-                                                    </button>
+                                                {editingMemberId === member.id ? (
+                                                    <div className="flex items-center gap-2">
+                                                        <select
+                                                            value={editingMemberRole}
+                                                            onChange={(e) => setEditingMemberRole(e.target.value)}
+                                                            className="px-2 py-1 border border-gray-300 rounded text-xs"
+                                                        >
+                                                            <option value="team_member">Team Member</option>
+                                                            <option value="team_leader">Team Leader</option>
+                                                            <option value="admin">Admin</option>
+                                                            <option value="super_admin">Super Admin</option>
+                                                        </select>
+                                                        <button 
+                                                            onClick={() => handleSaveMemberRole(member.id)}
+                                                            className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
+                                                        >
+                                                            Save
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => setEditingMemberId(null)}
+                                                            className="px-2 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        {!isLeader && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                                            <button 
+                                                                onClick={() => {
+                                                                    setEditingMemberId(member.id);
+                                                                    setEditingMemberRole(member.role);
+                                                                }}
+                                                                className="px-3 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
+                                                            >
+                                                                Edit Role
+                                                            </button>
+                                                        )}
+                                                        {!isLeader && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                                            <button
+                                                                onClick={() => handleRemoveMember(member.id)}
+                                                                className="px-3 py-1 border border-red-300 text-red-700 rounded text-xs hover:bg-red-50"
+                                                            >
+                                                                Remove
+                                                            </button>
+                                                        )}
+                                                    </>
                                                 )}
                                             </div>
                                         </div>
@@ -387,7 +533,10 @@ export default function TeamManagement({ currentUser }: Props) {
                         <div className="flex items-center justify-between mb-4">
                             <h2 className="text-lg font-semibold text-gray-900">Team Skills</h2>
                             {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
-                                <button className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50">
+                                <button 
+                                    onClick={() => setShowManageSkills(true)}
+                                    className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
+                                >
                                     Manage Skills
                                 </button>
                             )}
@@ -636,6 +785,19 @@ export default function TeamManagement({ currentUser }: Props) {
                                     rows={3}
                                 />
                             </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Team Leader</label>
+                                <select
+                                    value={editTeamLeaderId}
+                                    onChange={(e) => setEditTeamLeaderId(e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+                                >
+                                    <option value="">No Leader Assigned</option>
+                                    {users.map(u => (
+                                        <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                                    ))}
+                                </select>
+                            </div>
                             <div className="flex items-center gap-4">
                                 <label className="block text-sm font-medium text-gray-700">Team Color</label>
                                 <input
@@ -659,6 +821,116 @@ export default function TeamManagement({ currentUser }: Props) {
                                 className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
                             >
                                 Save Changes
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* Manage Skills Modal */}
+            {showManageSkills && team && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                    <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 shadow-2xl flex flex-col max-h-[85vh]">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xl font-semibold text-gray-900">Manage Team Skills</h3>
+                            <button className="p-2 hover:bg-gray-100 rounded-full text-gray-600" onClick={() => setShowManageSkills(false)}>
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="mb-4">
+                            <input
+                                type="text"
+                                placeholder="Search existing skills..."
+                                value={manageSkillsSearch}
+                                onChange={(e) => setManageSkillsSearch(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                            />
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto min-h-[300px] border border-gray-200 rounded-lg p-2 mb-4 bg-gray-50">
+                            <div className="grid grid-cols-2 gap-2">
+                                {skills
+                                    .filter(s => s.name.toLowerCase().includes(manageSkillsSearch.toLowerCase()))
+                                    .map(skill => {
+                                        const isSelected = team.skillIds.includes(skill.id);
+                                        return (
+                                            <div 
+                                                key={skill.id} 
+                                                className={`p-3 rounded-lg border flex flex-col justify-center transition-colors ${isSelected ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white hover:border-blue-300'}`}
+                                            >
+                                                {editingSkillId === skill.id ? (
+                                                    <div className="flex flex-col gap-2">
+                                                        <input type="text" value={editSkillName} onChange={e => setEditSkillName(e.target.value)} className="w-full px-2 py-1 text-sm border border-gray-300 rounded" />
+                                                        <input type="text" value={editSkillCategory} onChange={e => setEditSkillCategory(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
+                                                        <div className="flex gap-2 justify-end mt-1">
+                                                            <button onClick={() => setEditingSkillId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-300 rounded bg-white">Cancel</button>
+                                                            <button onClick={() => handleSaveEditSkill(skill.id)} className="text-xs text-white bg-blue-600 hover:bg-blue-700 px-2 py-1 rounded font-medium">Save</button>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex items-center justify-between w-full">
+                                                        <div className="cursor-pointer flex-1 min-w-0" onClick={() => handleToggleTeamSkill(skill.id)}>
+                                                            <div className={`text-sm font-medium truncate ${isSelected ? 'text-blue-900' : 'text-gray-900'}`}>{skill.name}</div>
+                                                            <div className={`text-xs truncate ${isSelected ? 'text-blue-600' : 'text-gray-500'}`}>{skill.category}</div>
+                                                        </div>
+                                                        <div className="flex items-center gap-1 shrink-0 pl-2">
+                                                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                                                <>
+                                                                    <button onClick={(e) => { e.stopPropagation(); setEditSkillName(skill.name); setEditSkillCategory(skill.category); setEditingSkillId(skill.id); }} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-100 rounded">
+                                                                        <Edit2 className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                    <button onClick={(e) => { e.stopPropagation(); handleDeleteSkill(skill.id); }} className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-100 rounded">
+                                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                            {isSelected && (
+                                                                <div className="w-5 h-5 ml-1 rounded-full bg-blue-500 text-white flex items-center justify-center">
+                                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                })}
+                            </div>
+                        </div>
+
+                        <div className="border-t border-gray-200 pt-4 mt-2">
+                            <h4 className="text-sm font-medium text-gray-900 mb-2">Create New Skill</h4>
+                            <div className="flex gap-2 items-center">
+                                <input
+                                    type="text"
+                                    placeholder="Skill Name"
+                                    value={newSkillName}
+                                    onChange={(e) => setNewSkillName(e.target.value)}
+                                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="Category (e.g. Design)"
+                                    value={newSkillCategory}
+                                    onChange={(e) => setNewSkillCategory(e.target.value)}
+                                    className="w-48 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                />
+                                <button
+                                    onClick={handleCreateNewSkill}
+                                    disabled={!newSkillName.trim()}
+                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    Create & Add
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="flex justify-end mt-6">
+                            <button 
+                                onClick={() => setShowManageSkills(false)}
+                                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200"
+                            >
+                                Close
                             </button>
                         </div>
                     </div>
