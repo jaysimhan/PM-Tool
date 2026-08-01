@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { User } from '../types/types';
+import { User, Task } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { AlertCircle, CheckCircle, Clock, TrendingUp, Users as UsersIcon, Briefcase, Tag, Globe, Grid, Share2 } from 'lucide-react';
 import { getStatusBadgeColor, formatStatusLabel, getPriorityColor } from '../utils/capacityCalculations';
