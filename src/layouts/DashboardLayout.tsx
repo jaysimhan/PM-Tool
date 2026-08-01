@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, Link, useNavigate } from 'react-router-dom';
-import { Building2, Users, Calendar, ClipboardList, BarChart3, Settings, Menu, Bell, FileText, Link as LinkIcon, LogOut, Lock, Sliders } from 'lucide-react';
+import { Building2, Users, Calendar, ClipboardList, BarChart3, Settings, Menu, Bell, FileText, Link as LinkIcon, LogOut, Lock, Sliders, GanttChart } from 'lucide-react';
 import { User } from '../types/types';
 import { useAuth } from '../contexts/AuthContext';
 import { Logo } from '../components/Logo';
@@ -247,7 +247,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                 </aside>
 
                 {/* Main Content */}
-                <main className="flex-1 p-6 min-w-0">
+                <main className="flex-1 min-w-0">
                     <Outlet />
                 </main>
             </div>

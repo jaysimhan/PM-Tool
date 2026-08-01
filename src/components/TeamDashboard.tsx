@@ -11,9 +11,6 @@ interface Props {
 export default function TeamDashboard({ currentUser }: Props) {
     // Get user's team(s)
     const userTeams = useMemo(() => {
-        if (currentUser.role === 'team_leader') {
-            return teams.filter(t => t.leaderId === currentUser.id);
-        }
         return teams.filter(t => t.memberIds.includes(currentUser.id));
     }, [currentUser]);
 

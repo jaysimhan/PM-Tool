@@ -71,11 +71,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
             if (usersData) {
                 const members = teamMembersData || [];
-                const teams = teamsData || [];
                 const transformedUsers = usersData.map((u: any) => {
-                    const memberTeams = members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id);
-                    const ledTeams = teams.filter((t: any) => t.leader_id === u.id).map((t: any) => t.id);
-                    const userTeams = Array.from(new Set([...memberTeams, ...ledTeams]));
+                    const userTeams = Array.from(new Set(members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id)));
                     return {
                         id: u.id,
                         name: u.name,
@@ -100,10 +97,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                         id: t.id,
                         name: t.name,
                         description: t.description,
-                        leaderId: t.leader_id,
                         color: t.color,
                         memberIds: teamMembers,
-                        skillIds: tSkillIds
+                        skillIds: tSkillIds,
+                        isHomeTeam: !!t.is_home_team
                     };
                 }) as unknown as Team[];
                 setTeams(transformedTeams);
@@ -174,21 +171,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const refreshUsers = async () => {
         const [
             { data: usersData },
-            { data: teamMembersData },
-            { data: teamsData }
+            { data: teamMembersData }
         ] = await Promise.all([
             supabase.from('users').select('*'),
-            supabase.from('team_members').select('*'),
-            supabase.from('teams').select('*')
+            supabase.from('team_members').select('*')
         ]);
         if (usersData) {
             const members = teamMembersData || [];
-            const teams = teamsData || [];
             const transformedUsers = usersData.map((u: any) => {
-                const memberTeams = members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id);
-                const ledTeams = teams.filter((t: any) => t.leader_id === u.id).map((t: any) => t.id);
-                const userTeams = Array.from(new Set([...memberTeams, ...ledTeams]));
-                
+                const userTeams = Array.from(new Set(members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id)));
                 return {
                     id: u.id,
                     name: u.name,
@@ -255,10 +246,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                     id: t.id,
                     name: t.name,
                     description: t.description,
-                    leaderId: t.leader_id,
                     color: t.color,
                     memberIds: teamMembers,
-                    skillIds: tSkillIds
+                    skillIds: tSkillIds,
+                    isHomeTeam: !!t.is_home_team
                 };
             }) as unknown as Team[];
             setTeams(transformedTeams);

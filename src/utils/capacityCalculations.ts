@@ -152,7 +152,7 @@ export const getStatusBadgeColor = (status: string): string => {
         case 'in_review':
             return 'bg-yellow-100 text-yellow-800';
         case 'on_hold':
-            return 'bg-gray-100 text-gray-600';
+            return 'bg-red-100 text-red-800';
         case 'completed':
             return 'bg-green-100 text-green-800';
         // legacy request statuses (for request panels)
@@ -196,7 +196,7 @@ export const getStatusDotColor = (status: string): string => {
         case 'planning':    return 'bg-indigo-500';
         case 'in_progress': return 'bg-blue-500';
         case 'in_review':   return 'bg-yellow-500';
-        case 'on_hold':     return 'bg-gray-400';
+        case 'on_hold':     return 'bg-red-500';
         case 'completed':   return 'bg-green-500';
         case 'pending':     return 'bg-yellow-400';
         case 'assigned':    return 'bg-blue-400';
@@ -207,3 +207,114 @@ export const getStatusDotColor = (status: string): string => {
         default:            return 'bg-gray-400';
     }
 };
+
+export interface TimelineBounds {
+    start: Date;
+    end: Date;
+}
+
+export interface TimelineColumn {
+    date: Date;
+    endDate: Date;
+    label: string;
+    subLabel?: string;
+    isWeekend?: boolean;
+}
+
+export function getProjectTimelineBounds(tasks: Task[]): TimelineBounds {
+    if (!tasks || tasks.length === 0) {
+        const today = new Date();
+        const start = new Date(today);
+        start.setDate(start.getDate() - 7);
+        const end = new Date(today);
+        end.setDate(end.getDate() + 28);
+        return { start, end };
+    }
+
+    let minStart = new Date(3000, 0, 1).getTime();
+    let maxEnd = new Date(1970, 0, 1).getTime();
+
+    tasks.forEach(t => {
+        if (t.proposedStartDate) {
+            const start = new Date(t.proposedStartDate).getTime();
+            if (start < minStart) minStart = start;
+        }
+        if (t.proposedEndDate) {
+            const end = new Date(t.proposedEndDate).getTime();
+            if (end > maxEnd) maxEnd = end;
+        }
+    });
+
+    if (minStart > maxEnd) {
+        const today = new Date();
+        minStart = today.getTime() - 7 * 24 * 60 * 60 * 1000;
+        maxEnd = today.getTime() + 28 * 24 * 60 * 60 * 1000;
+    }
+
+    const startDate = new Date(minStart);
+    startDate.setDate(startDate.getDate() - 7); // Pad start
+
+    const endDate = new Date(maxEnd);
+    endDate.setDate(endDate.getDate() + 14); // Pad end
+
+    return { start: startDate, end: endDate };
+}
+
+export function getTimelineColumns(bounds: TimelineBounds, scale: 'day' | 'week' | 'month'): TimelineColumn[] {
+    const columns: TimelineColumn[] = [];
+    const current = new Date(bounds.start);
+    current.setHours(0, 0, 0, 0);
+
+    const end = new Date(bounds.end);
+    end.setHours(23, 59, 59, 999);
+
+    if (scale === 'day') {
+        while (current <= end) {
+            const colEnd = new Date(current);
+            colEnd.setHours(23, 59, 59, 999);
+            const isWeekend = current.getDay() === 0 || current.getDay() === 6;
+            columns.push({
+                date: new Date(current),
+                endDate: colEnd,
+                label: current.getDate().toString(),
+                subLabel: current.toLocaleDateString('en-US', { weekday: 'narrow' }),
+                isWeekend
+            });
+            current.setDate(current.getDate() + 1);
+        }
+    } else if (scale === 'week') {
+        const day = current.getDay();
+        const diff = current.getDate() - day + (day === 0 ? -6 : 1); // adjust to Monday
+        current.setDate(diff);
+
+        while (current <= end) {
+            const weekEnd = new Date(current);
+            weekEnd.setDate(current.getDate() + 6);
+            weekEnd.setHours(23, 59, 59, 999);
+            columns.push({
+                date: new Date(current),
+                endDate: weekEnd,
+                label: `W${Math.ceil(current.getDate() / 7)}`,
+                subLabel: `${current.getMonth() + 1}/${current.getDate()}`
+            });
+            current.setDate(current.getDate() + 7);
+        }
+    } else if (scale === 'month') {
+        current.setDate(1);
+        while (current <= end) {
+            const colEnd = new Date(current);
+            colEnd.setMonth(current.getMonth() + 1);
+            colEnd.setDate(0);
+            colEnd.setHours(23, 59, 59, 999);
+            columns.push({
+                date: new Date(current),
+                endDate: colEnd,
+                label: current.toLocaleDateString('en-US', { month: 'short' }),
+                subLabel: current.getFullYear().toString()
+            });
+            current.setMonth(current.getMonth() + 1);
+        }
+    }
+
+    return columns;
+}

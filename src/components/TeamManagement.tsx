@@ -27,8 +27,12 @@ export default function TeamManagement({ currentUser }: Props) {
     const [editTeamName, setEditTeamName] = useState('');
     const [editTeamDesc, setEditTeamDesc] = useState('');
     const [editTeamColor, setEditTeamColor] = useState('');
-    const [editTeamLeaderId, setEditTeamLeaderId] = useState('');
     const [showManageSkills, setShowManageSkills] = useState(false);
+    const [showTransferOwnership, setShowTransferOwnership] = useState(false);
+    const [transferTargetId, setTransferTargetId] = useState('');
+    // The team a modal (invite/edit/delete/manage skills) is acting on - distinct from
+    // selectedTeam because selectedTeam can be 'all' while a modal still targets one team.
+    const [actionTeamId, setActionTeamId] = useState('');
     const [manageSkillsSearch, setManageSkillsSearch] = useState('');
     const [newSkillName, setNewSkillName] = useState('');
     const [newSkillCategory, setNewSkillCategory] = useState('General');
@@ -44,22 +48,31 @@ export default function TeamManagement({ currentUser }: Props) {
         }
     }, [teams, selectedTeam]);
 
-    const team = teams.find(t => t.id === selectedTeam);
-    const teamMembers = team ? users.filter(u => team.memberIds.includes(u.id)) : [];
-    const teamLeader = team ? users.find(u => u.id === team.leaderId) : null;
+    const team = selectedTeam !== 'all' ? teams.find(t => t.id === selectedTeam) : undefined;
+    const actionTeam = teams.find(t => t.id === actionTeamId);
     const getSkillName = (skillId: string) => {
         return skills.find(s => s.id === skillId)?.name || skillId;
     };
 
-    const handleRemoveMember = async (userId: string) => {
-        if (!team) return;
+    // Only the super admin can assign 'admin'; admins/super admin can assign 'team_leader'.
+    // 'super_admin' itself only ever changes via Transfer Ownership.
+    const assignableRoles = currentUser.role === 'super_admin'
+        ? ['team_member', 'team_leader', 'admin']
+        : ['team_member', 'team_leader'];
+
+    const handleRemoveMember = async (teamId: string, userId: string) => {
+        const member = users.find(u => u.id === userId);
+        if (member?.role === 'super_admin') {
+            toast.error('The super admin cannot be removed from their team. Transfer ownership first.');
+            return;
+        }
         confirm('Are you sure you want to remove this member?', async () => {
             const { error } = await supabase
                 .from('team_members')
                 .delete()
-                .eq('team_id', team.id)
+                .eq('team_id', teamId)
                 .eq('user_id', userId);
-            
+
             if (error) {
                 console.error('Error removing member:', error);
                 toast.error('Error removing member.');
@@ -73,6 +86,10 @@ export default function TeamManagement({ currentUser }: Props) {
 
     const handleSaveMemberRole = async (userId: string) => {
         if (!editingMemberRole) return;
+        if (!assignableRoles.includes(editingMemberRole)) {
+            toast.error('You are not allowed to assign that role.');
+            return;
+        }
         const { error } = await supabase.from('users').update({ role: editingMemberRole }).eq('id', userId);
         if (error) {
             console.error('Error updating user role:', error);
@@ -84,8 +101,47 @@ export default function TeamManagement({ currentUser }: Props) {
         }
     };
 
+    const handleTransferOwnership = async () => {
+        if (!transferTargetId) return;
+        const target = users.find(u => u.id === transferTargetId);
+        if (!target) return;
+        confirm(`Transfer ownership to ${target.name}? You will become an admin and lose super admin access.`, async () => {
+            const { error } = await supabase.rpc('transfer_super_admin_ownership', { new_super_admin_id: transferTargetId });
+            if (error) {
+                console.error('Error transferring ownership:', error);
+                toast.error(error.message || 'Error transferring ownership.');
+            } else {
+                await refreshUsers();
+                await refreshTeams();
+                setShowTransferOwnership(false);
+                setTransferTargetId('');
+                toast.success(`Ownership transferred to ${target.name}.`);
+            }
+        });
+    };
+
+    const handleDeleteTeam = (t: typeof teams[0]) => {
+        if (t.isHomeTeam) {
+            toast.error('The home team cannot be deleted — the super admin must always belong to it.');
+            return;
+        }
+        confirm(`Delete "${t.name}"? This removes all its members and skills.`, async () => {
+            const { error } = await supabase.from('teams').delete().eq('id', t.id);
+            if (error) {
+                console.error('Error deleting team:', error);
+                toast.error('Error deleting team.');
+            } else {
+                await refreshTeams();
+                if (selectedTeam === t.id) {
+                    setSelectedTeam(teams.find(other => other.id !== t.id)?.id || '');
+                }
+                toast.success('Team deleted.');
+            }
+        });
+    };
+
     const handleSendInvites = async () => {
-        if (!team) return;
+        if (!actionTeam) return;
         let successfulInvites = 0;
 
         let inviteesToProcess = [...selectedInvitees];
@@ -116,6 +172,17 @@ export default function TeamManagement({ currentUser }: Props) {
 
         for (const user of inviteesToProcess) {
             let userId = user.id;
+
+            // Existing users can only belong to one team at a time
+            if (!userId.startsWith('temp-')) {
+                const existingUser = users.find(u => u.id === userId);
+                const conflictingTeamId = existingUser?.teamIds.find(tid => tid !== actionTeam.id);
+                if (conflictingTeamId) {
+                    const conflictingTeamName = teams.find(t => t.id === conflictingTeamId)?.name || 'another team';
+                    toast.error(`${existingUser!.name} is already on ${conflictingTeamName} and cannot be added to multiple teams.`);
+                    continue;
+                }
+            }
 
             // If the user ID starts with temp-, they are a new user that needs to be invited via Supabase Auth
             if (userId.startsWith('temp-')) {
@@ -149,7 +216,7 @@ export default function TeamManagement({ currentUser }: Props) {
 
             const { error } = await supabase
                 .from('team_members')
-                .insert({ team_id: team.id, user_id: userId });
+                .insert({ team_id: actionTeam.id, user_id: userId });
             
             if (error) {
                 console.error('Error adding member:', error);
@@ -180,8 +247,8 @@ export default function TeamManagement({ currentUser }: Props) {
     };
 
     const handleCopyLink = () => {
-        if (!team) return;
-        const link = `${window.location.origin}/team/invite/${team.id}`;
+        if (!actionTeam) return;
+        const link = `${window.location.origin}/team/invite/${actionTeam.id}`;
         navigator.clipboard.writeText(link);
         toast.success('Invite link copied to clipboard');
     };
@@ -193,8 +260,7 @@ export default function TeamManagement({ currentUser }: Props) {
             .insert({
                 name: newTeamName,
                 description: newTeamDesc,
-                color: newTeamColor,
-                leader_id: currentUser.id
+                color: newTeamColor
             })
             .select();
         
@@ -212,26 +278,24 @@ export default function TeamManagement({ currentUser }: Props) {
             toast.success('Team created.');
         }
     };
-    const handleOpenEditTeam = () => {
-        if (!team) return;
-        setEditTeamName(team.name);
-        setEditTeamDesc(team.description);
-        setEditTeamColor(team.color);
-        setEditTeamLeaderId(team.leaderId || '');
+    const handleOpenEditTeam = (t: typeof teams[0]) => {
+        setEditTeamName(t.name);
+        setEditTeamDesc(t.description);
+        setEditTeamColor(t.color);
         setShowEditTeam(true);
     };
 
     const handleSaveEditTeam = async () => {
-        if (!team || !editTeamName) return;
+        if (!actionTeam || !editTeamName) return;
+
         const { error } = await supabase
             .from('teams')
             .update({
                 name: editTeamName,
                 description: editTeamDesc,
-                color: editTeamColor,
-                leader_id: editTeamLeaderId || null
+                color: editTeamColor
             })
-            .eq('id', team.id);
+            .eq('id', actionTeam.id);
         
         if (error) {
             console.error('Error updating team:', error);
@@ -244,18 +308,18 @@ export default function TeamManagement({ currentUser }: Props) {
     };
 
     const handleToggleTeamSkill = async (skillId: string) => {
-        if (!team) return;
-        const isSelected = team.skillIds.includes(skillId);
+        if (!actionTeam) return;
+        const isSelected = actionTeam.skillIds.includes(skillId);
         if (isSelected) {
-            await supabase.from('team_skills').delete().eq('team_id', team.id).eq('skill_id', skillId);
+            await supabase.from('team_skills').delete().eq('team_id', actionTeam.id).eq('skill_id', skillId);
         } else {
-            await supabase.from('team_skills').insert({ team_id: team.id, skill_id: skillId });
+            await supabase.from('team_skills').insert({ team_id: actionTeam.id, skill_id: skillId });
         }
         await refreshTeams();
     };
 
     const handleCreateNewSkill = async () => {
-        if (!newSkillName.trim() || !team) return;
+        if (!newSkillName.trim() || !actionTeam) return;
         const { data, error } = await supabase.from('skills').insert({
             name: newSkillName.trim(),
             category: newSkillCategory
@@ -268,7 +332,7 @@ export default function TeamManagement({ currentUser }: Props) {
         }
         if (data && data[0]) {
             if (refreshSkills) await refreshSkills();
-            await supabase.from('team_skills').insert({ team_id: team.id, skill_id: data[0].id });
+            await supabase.from('team_skills').insert({ team_id: actionTeam.id, skill_id: data[0].id });
             await refreshTeams();
             setNewSkillName('');
             toast.success('Skill created.');
@@ -305,6 +369,272 @@ export default function TeamManagement({ currentUser }: Props) {
         }
     };
 
+    const renderTeamSection = (t: typeof teams[0]) => {
+        const teamMembers = users.filter(u => t.memberIds.includes(u.id));
+        // Leadership/adminship is just a role held by whoever is on the team - a team can
+        // have any number of leaders/admins, or none.
+        const teamLeaders = teamMembers.filter(m => m.role === 'team_leader');
+        const teamAdmins = teamMembers.filter(m => m.role === 'admin' || m.role === 'super_admin');
+
+        return (
+            <>
+                {/* Team Overview */}
+                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                    <div className="flex items-start justify-between mb-6">
+                        <div>
+                            <div className="flex items-center gap-3 mb-2">
+                                <div
+                                    className="w-10 h-10 rounded-lg flex items-center justify-center"
+                                    style={{ backgroundColor: `${t.color}20` }}
+                                >
+                                    <UsersIcon className="w-6 h-6" style={{ color: t.color }} />
+                                </div>
+                                <div>
+                                    <h2 className="text-xl font-semibold text-gray-900">{t.name}</h2>
+                                    <p className="text-sm text-gray-600">{t.description}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                <button
+                                    onClick={() => { setActionTeamId(t.id); handleOpenEditTeam(t); }}
+                                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
+                                >
+                                    <Settings className="w-4 h-4" />
+                                    Edit Team
+                                </button>
+                            )}
+                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && !t.isHomeTeam && (
+                                <button
+                                    onClick={() => handleDeleteTeam(t)}
+                                    className="px-3 py-2 border border-red-300 text-red-700 rounded-lg text-sm hover:bg-red-50 flex items-center gap-2"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                    Delete Team
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-6">
+                        <div>
+                            <div className="text-sm text-gray-600 mb-1">Team Leaders</div>
+                            {teamLeaders.length > 0 ? (
+                                <div className="flex flex-wrap items-center gap-2">
+                                    {teamLeaders.map(leader => (
+                                        <div key={leader.id} className="flex items-center gap-1.5">
+                                            <div
+                                                className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-medium"
+                                                style={{ backgroundColor: t.color }}
+                                            >
+                                                {leader.name.split(' ').map(n => n[0]).join('')}
+                                            </div>
+                                            <span className="text-sm font-medium text-gray-900">{leader.name}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <span className="text-sm text-gray-400">No leader assigned</span>
+                            )}
+                        </div>
+
+                        <div>
+                            <div className="text-sm text-gray-600 mb-1">Team Admins</div>
+                            {teamAdmins.length > 0 ? (
+                                <div className="flex flex-wrap items-center gap-2">
+                                    {teamAdmins.map(admin => (
+                                        <div key={admin.id} className="flex items-center gap-1.5">
+                                            <div
+                                                className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-medium"
+                                                style={{ backgroundColor: t.color }}
+                                            >
+                                                {admin.name.split(' ').map(n => n[0]).join('')}
+                                            </div>
+                                            <span className="text-sm font-medium text-gray-900">{admin.name}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <span className="text-sm text-gray-400">No admin assigned</span>
+                            )}
+                        </div>
+
+                        <div>
+                            <div className="text-sm text-gray-600 mb-1">Team Members</div>
+                            <div className="text-2xl font-semibold text-gray-900">{teamMembers.length}</div>
+                        </div>
+
+                        <div>
+                            <div className="text-sm text-gray-600 mb-1">Team Skills</div>
+                            <div className="text-2xl font-semibold text-gray-900">{t.skillIds.length}</div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Team Members */}
+                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-lg font-semibold text-gray-900">Team Members</h2>
+                        {(currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'team_leader') && (
+                            <button
+                                onClick={() => { setActionTeamId(t.id); setShowInviteMember(true); }}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
+                            >
+                                <UserPlus className="w-4 h-4" />
+                                Invite Team Member
+                            </button>
+                        )}
+                    </div>
+
+                    <div className="space-y-3">
+                        {teamMembers.map(member => {
+                            const memberSkills = member.skillIds.map(id => getSkillName(id));
+                            const isProtected = member.role === 'super_admin';
+
+                            return (
+                                <div key={member.id} className="border border-gray-200 rounded-lg p-4 hover:border-blue-300 transition-colors">
+                                    <div className="flex items-start justify-between">
+                                        <div className="flex items-start gap-3 flex-1">
+                                            <div
+                                                className="w-12 h-12 rounded-full flex items-center justify-center text-white text-sm font-medium"
+                                                style={{ backgroundColor: t.color }}
+                                            >
+                                                {member.name.split(' ').map(n => n[0]).join('')}
+                                            </div>
+
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <h3 className="text-sm font-medium text-gray-900">{member.name}</h3>
+                                                    <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded capitalize">
+                                                        {member.role.replace('_', ' ')}
+                                                    </span>
+                                                </div>
+
+                                                <div className="text-xs text-gray-500 mb-2">{member.email}</div>
+
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <span className="text-xs text-gray-600">Daily Capacity:</span>
+                                                    <span className="text-xs font-medium text-gray-900">{member.dailyCapacity}h</span>
+                                                </div>
+
+                                                <div className="flex items-start gap-2">
+                                                    <Award className="w-4 h-4 text-gray-400 mt-0.5" />
+                                                    <div className="flex-1">
+                                                        <div className="text-xs text-gray-600 mb-1">Skills:</div>
+                                                        <div className="flex flex-wrap gap-1">
+                                                            {memberSkills.slice(0, 4).map((skill, index) => (
+                                                                <span key={index} className="px-2 py-0.5 bg-purple-50 text-purple-700 text-xs rounded">
+                                                                    {skill}
+                                                                </span>
+                                                            ))}
+                                                            {memberSkills.length > 4 && (
+                                                                <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
+                                                                    +{memberSkills.length - 4} more
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2 ml-4">
+                                            {editingMemberId === member.id ? (
+                                                <div className="flex items-center gap-2">
+                                                    <select
+                                                        value={editingMemberRole}
+                                                        onChange={(e) => setEditingMemberRole(e.target.value)}
+                                                        className="pl-2 pr-6 py-1 bg-white border border-gray-300 rounded text-xs appearance-none focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer"
+                                                        style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' stroke='%239ca3af' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center' }}
+                                                    >
+                                                        {assignableRoles.map(role => (
+                                                            <option key={role} value={role}>
+                                                                {role.replace('_', ' ').replace(/^./, c => c.toUpperCase())}
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                    <button
+                                                        onClick={() => handleSaveMemberRole(member.id)}
+                                                        className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
+                                                    >
+                                                        Save
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setEditingMemberId(null)}
+                                                        className="px-2 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    {!isProtected && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                                        <button
+                                                            onClick={() => {
+                                                                setEditingMemberId(member.id);
+                                                                setEditingMemberRole(member.role);
+                                                            }}
+                                                            className="px-3 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
+                                                        >
+                                                            Edit Role
+                                                        </button>
+                                                    )}
+                                                    {!isProtected && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                                        <button
+                                                            onClick={() => handleRemoveMember(t.id, member.id)}
+                                                            className="px-3 py-1 border border-red-300 text-red-700 rounded text-xs hover:bg-red-50"
+                                                        >
+                                                            Remove
+                                                        </button>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {/* Team Skills */}
+                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-lg font-semibold text-gray-900">Team Skills</h2>
+                        {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                            <button
+                                onClick={() => { setActionTeamId(t.id); setShowManageSkills(true); }}
+                                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
+                            >
+                                Manage Skills
+                            </button>
+                        )}
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-3">
+                        {t.skillIds.map(skillId => {
+                            const skill = skills.find(s => s.id === skillId);
+                            if (!skill) return null;
+
+                            const membersWithSkill = teamMembers.filter(m => m.skillIds.includes(skillId)).length;
+
+                            return (
+                                <div key={skillId} className="border border-gray-200 rounded-lg p-3">
+                                    <div className="text-sm font-medium text-gray-900 mb-1">{skill.name}</div>
+                                    <div className="text-xs text-gray-500">
+                                        {membersWithSkill} {membersWithSkill === 1 ? 'member' : 'members'}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            </>
+        );
+    };
+
     return (
         <div className="space-y-6">
             {/* Header */}
@@ -321,247 +651,41 @@ export default function TeamManagement({ currentUser }: Props) {
                         <select
                             value={selectedTeam}
                             onChange={(e) => setSelectedTeam(e.target.value)}
-                            className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                            className="pl-3 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer"
+                            style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' stroke='%239ca3af' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center' }}
                         >
+                            <option value="all">All Teams</option>
                             {teams.map(t => (
                                 <option key={t.id} value={t.id}>{t.name}</option>
                             ))}
                         </select>
                     </div>
 
-                    {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
-                        <button 
-                            onClick={() => setShowCreateTeam(true)}
-                            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
-                        >
-                            Create New Team
-                        </button>
-                    )}
+                    <div className="flex items-center gap-2">
+                        {currentUser.role === 'super_admin' && (
+                            <button
+                                onClick={() => setShowTransferOwnership(true)}
+                                className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
+                            >
+                                <Shield className="w-4 h-4" />
+                                Transfer Ownership
+                            </button>
+                        )}
+                        {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                            <button
+                                onClick={() => setShowCreateTeam(true)}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                            >
+                                Create New Team
+                            </button>
+                        )}
+                    </div>
                 </div>
             </div>
 
-            {team && (
-                <>
-                    {/* Team Overview */}
-                    <div className="bg-white rounded-lg border border-gray-200 p-6">
-                        <div className="flex items-start justify-between mb-6">
-                            <div>
-                                <div className="flex items-center gap-3 mb-2">
-                                    <div
-                                        className="w-10 h-10 rounded-lg flex items-center justify-center"
-                                        style={{ backgroundColor: `${team.color}20` }}
-                                    >
-                                        <UsersIcon className="w-6 h-6" style={{ color: team.color }} />
-                                    </div>
-                                    <div>
-                                        <h2 className="text-xl font-semibold text-gray-900">{team.name}</h2>
-                                        <p className="text-sm text-gray-600">{team.description}</p>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
-                                <button 
-                                    onClick={handleOpenEditTeam}
-                                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
-                                >
-                                    <Settings className="w-4 h-4" />
-                                    Edit Team
-                                </button>
-                            )}
-                        </div>
-
-                        <div className="grid grid-cols-3 gap-6">
-                            <div>
-                                <div className="text-sm text-gray-600 mb-1">Team Leader</div>
-                                {teamLeader && (
-                                    <div className="flex items-center gap-2">
-                                        <div
-                                            className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-medium"
-                                            style={{ backgroundColor: team.color }}
-                                        >
-                                            {teamLeader.name.split(' ').map(n => n[0]).join('')}
-                                        </div>
-                                        <span className="text-sm font-medium text-gray-900">{teamLeader.name}</span>
-                                    </div>
-                                )}
-                            </div>
-
-                            <div>
-                                <div className="text-sm text-gray-600 mb-1">Team Members</div>
-                                <div className="text-2xl font-semibold text-gray-900">{teamMembers.length}</div>
-                            </div>
-
-                            <div>
-                                <div className="text-sm text-gray-600 mb-1">Team Skills</div>
-                                <div className="text-2xl font-semibold text-gray-900">{team.skillIds.length}</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Team Members */}
-                    <div className="bg-white rounded-lg border border-gray-200 p-6">
-                        <div className="flex items-center justify-between mb-4">
-                            <h2 className="text-lg font-semibold text-gray-900">Team Members</h2>
-                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'team_leader') && (
-                                <button
-                                    onClick={() => setShowInviteMember(true)}
-                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
-                                >
-                                    <UserPlus className="w-4 h-4" />
-                                    Invite Team Member
-                                </button>
-                            )}
-                        </div>
-
-                        <div className="space-y-3">
-                            {teamMembers.map(member => {
-                                const memberSkills = member.skillIds.map(id => getSkillName(id));
-                                const isLeader = member.id === team.leaderId;
-
-                                return (
-                                    <div key={member.id} className="border border-gray-200 rounded-lg p-4 hover:border-blue-300 transition-colors">
-                                        <div className="flex items-start justify-between">
-                                            <div className="flex items-start gap-3 flex-1">
-                                                <div
-                                                    className="w-12 h-12 rounded-full flex items-center justify-center text-white text-sm font-medium"
-                                                    style={{ backgroundColor: team.color }}
-                                                >
-                                                    {member.name.split(' ').map(n => n[0]).join('')}
-                                                </div>
-
-                                                <div className="flex-1">
-                                                    <div className="flex items-center gap-2 mb-1">
-                                                        <h3 className="text-sm font-medium text-gray-900">{member.name}</h3>
-                                                        {isLeader && (
-                                                            <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
-                                                                Team Leader
-                                                            </span>
-                                                        )}
-                                                        <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded capitalize">
-                                                            {member.role.replace('_', ' ')}
-                                                        </span>
-                                                    </div>
-
-                                                    <div className="text-xs text-gray-500 mb-2">{member.email}</div>
-
-                                                    <div className="flex items-center gap-2 mb-2">
-                                                        <span className="text-xs text-gray-600">Daily Capacity:</span>
-                                                        <span className="text-xs font-medium text-gray-900">{member.dailyCapacity}h</span>
-                                                    </div>
-
-                                                    <div className="flex items-start gap-2">
-                                                        <Award className="w-4 h-4 text-gray-400 mt-0.5" />
-                                                        <div className="flex-1">
-                                                            <div className="text-xs text-gray-600 mb-1">Skills:</div>
-                                                            <div className="flex flex-wrap gap-1">
-                                                                {memberSkills.slice(0, 4).map((skill, index) => (
-                                                                    <span key={index} className="px-2 py-0.5 bg-purple-50 text-purple-700 text-xs rounded">
-                                                                        {skill}
-                                                                    </span>
-                                                                ))}
-                                                                {memberSkills.length > 4 && (
-                                                                    <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
-                                                                        +{memberSkills.length - 4} more
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <div className="flex items-center gap-2 ml-4">
-                                                {editingMemberId === member.id ? (
-                                                    <div className="flex items-center gap-2">
-                                                        <select
-                                                            value={editingMemberRole}
-                                                            onChange={(e) => setEditingMemberRole(e.target.value)}
-                                                            className="px-2 py-1 border border-gray-300 rounded text-xs"
-                                                        >
-                                                            <option value="team_member">Team Member</option>
-                                                            <option value="team_leader">Team Leader</option>
-                                                            <option value="admin">Admin</option>
-                                                            <option value="super_admin">Super Admin</option>
-                                                        </select>
-                                                        <button 
-                                                            onClick={() => handleSaveMemberRole(member.id)}
-                                                            className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
-                                                        >
-                                                            Save
-                                                        </button>
-                                                        <button 
-                                                            onClick={() => setEditingMemberId(null)}
-                                                            className="px-2 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
-                                                        >
-                                                            Cancel
-                                                        </button>
-                                                    </div>
-                                                ) : (
-                                                    <>
-                                                        {!isLeader && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
-                                                            <button 
-                                                                onClick={() => {
-                                                                    setEditingMemberId(member.id);
-                                                                    setEditingMemberRole(member.role);
-                                                                }}
-                                                                className="px-3 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
-                                                            >
-                                                                Edit Role
-                                                            </button>
-                                                        )}
-                                                        {!isLeader && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
-                                                            <button
-                                                                onClick={() => handleRemoveMember(member.id)}
-                                                                className="px-3 py-1 border border-red-300 text-red-700 rounded text-xs hover:bg-red-50"
-                                                            >
-                                                                Remove
-                                                            </button>
-                                                        )}
-                                                    </>
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    {/* Team Skills */}
-                    <div className="bg-white rounded-lg border border-gray-200 p-6">
-                        <div className="flex items-center justify-between mb-4">
-                            <h2 className="text-lg font-semibold text-gray-900">Team Skills</h2>
-                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
-                                <button 
-                                    onClick={() => setShowManageSkills(true)}
-                                    className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
-                                >
-                                    Manage Skills
-                                </button>
-                            )}
-                        </div>
-
-                        <div className="grid grid-cols-4 gap-3">
-                            {team.skillIds.map(skillId => {
-                                const skill = skills.find(s => s.id === skillId);
-                                if (!skill) return null;
-
-                                const membersWithSkill = teamMembers.filter(m => m.skillIds.includes(skillId)).length;
-
-                                return (
-                                    <div key={skillId} className="border border-gray-200 rounded-lg p-3">
-                                        <div className="text-sm font-medium text-gray-900 mb-1">{skill.name}</div>
-                                        <div className="text-xs text-gray-500">
-                                            {membersWithSkill} {membersWithSkill === 1 ? 'member' : 'members'}
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-                </>
-            )}
+            {selectedTeam === 'all'
+                ? teams.map(t => <React.Fragment key={t.id}>{renderTeamSection(t)}</React.Fragment>)
+                : team && renderTeamSection(team)}
 
             {/* Invite Member Modal */}
             {showInviteMember && (
@@ -760,7 +884,7 @@ export default function TeamManagement({ currentUser }: Props) {
                 </div>
             )}
             {/* Edit Team Modal */}
-            {showEditTeam && team && (
+            {showEditTeam && actionTeam && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
                         <h3 className="text-lg font-semibold text-gray-900 mb-4">Edit Team</h3>
@@ -784,19 +908,6 @@ export default function TeamManagement({ currentUser }: Props) {
                                     placeholder="Enter team description"
                                     rows={3}
                                 />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Team Leader</label>
-                                <select
-                                    value={editTeamLeaderId}
-                                    onChange={(e) => setEditTeamLeaderId(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
-                                >
-                                    <option value="">No Leader Assigned</option>
-                                    {users.map(u => (
-                                        <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
-                                    ))}
-                                </select>
                             </div>
                             <div className="flex items-center gap-4">
                                 <label className="block text-sm font-medium text-gray-700">Team Color</label>
@@ -826,8 +937,49 @@ export default function TeamManagement({ currentUser }: Props) {
                     </div>
                 </div>
             )}
+            {/* Transfer Ownership Modal */}
+            {showTransferOwnership && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                    <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+                        <h3 className="text-lg font-semibold text-gray-900 mb-2">Transfer Ownership</h3>
+                        <p className="text-sm text-gray-600 mb-4">
+                            There is only one super admin at a time. Transferring ownership makes the
+                            selected person super admin and moves them to {teams.find(t => t.isHomeTeam)?.name || 'the home team'};
+                            you will become an admin.
+                        </p>
+                        <div className="mb-6">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">New Super Admin</label>
+                            <select
+                                value={transferTargetId}
+                                onChange={(e) => setTransferTargetId(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+                            >
+                                <option value="">Select a person</option>
+                                {users.filter(u => u.id !== currentUser.id).map(u => (
+                                    <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                            <button
+                                onClick={() => { setShowTransferOwnership(false); setTransferTargetId(''); }}
+                                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleTransferOwnership}
+                                disabled={!transferTargetId}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                Transfer Ownership
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             {/* Manage Skills Modal */}
-            {showManageSkills && team && (
+            {showManageSkills && actionTeam && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 shadow-2xl flex flex-col max-h-[85vh]">
                         <div className="flex justify-between items-center mb-4">
@@ -852,7 +1004,7 @@ export default function TeamManagement({ currentUser }: Props) {
                                 {skills
                                     .filter(s => s.name.toLowerCase().includes(manageSkillsSearch.toLowerCase()))
                                     .map(skill => {
-                                        const isSelected = team.skillIds.includes(skill.id);
+                                        const isSelected = actionTeam.skillIds.includes(skill.id);
                                         return (
                                             <div 
                                                 key={skill.id} 

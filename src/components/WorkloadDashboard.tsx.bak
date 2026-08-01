@@ -1,13 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { 
-    Priority, Status, Brand, Region, ViewMode as HelperViewMode, TimeScale, 
-    PRIORITY_CONFIG, STATUS_CONFIG, BRAND_CONFIG, REGION_CONFIG, 
-    loadColor, loadLabel, PriorityPill, Pill, CapBar, ViewIcons 
-} from './WorkloadDashboardHelpers';
-
 import { User, Task } from '../types/types';
 import { useData } from '../contexts/DataContext';
-import { calculateDailyCapacity, getDatesInRange, formatDate, getWorkloadColor, getStatusBadgeColor, formatStatusLabel, getPriorityColor, getProjectTimelineBounds, getTimelineColumns, TimelineColumn } from '../utils/capacityCalculations';
+import { calculateDailyCapacity, getDatesInRange, formatDate, getWorkloadColor, getStatusBadgeColor, formatStatusLabel, getPriorityColor } from '../utils/capacityCalculations';
 import { Filter, Download, Calendar, List, LayoutGrid, GanttChart, ArrowUpDown } from 'lucide-react';
 import TaskDetailsPanel from './TaskDetailsPanel';
 import { TimelineContainer } from './TimelineContainer';
@@ -82,6 +76,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         if (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager') {
             return teams;
         }
+        if (currentUser.role === 'team_leader') {
+            return teams.filter(t => t.leaderId === currentUser.id);
+        }
         return teams.filter(t => t.memberIds && t.memberIds.includes(currentUser.id));
     }, [currentUser, teams]);
 
@@ -92,12 +89,13 @@ export default function WorkloadDashboard({ currentUser }: Props) {
             return users.filter(u =>
                 u.role !== 'requester' &&
                 u.isActive &&
+                ((u.teamIds && u.teamIds.length > 0) || tasks.some(t => t.assignedToId === u.id)) &&
                 (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager' || (u.teamIds && u.teamIds.some(tid => visibleTeamIds.includes(tid))) || u.id === currentUser.id)
             );
         }
 
         const team = teams.find(t => t.id === selectedTeamId);
-        return team ? users.filter(u => u.teamIds && u.teamIds.includes(selectedTeamId)) : [];
+        return team ? users.filter(u => team.memberIds && team.memberIds.includes(u.id)) : [];
     }, [selectedTeamId, visibleTeams, users, tasks, currentUser]);
 
     // Calculate capacity for each user and date
@@ -248,7 +246,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                 <table className="w-full">
                     <thead className="bg-gray-50 border-b border-gray-200">
                         <tr>
-                            <th className="sticky left-0 z-20 bg-gray-50 px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48 border-r border-gray-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                            <th className="sticky left-0 z-20 bg-gray-50 px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48 border-r border-gray-200">
                                 Team Member
                             </th>
                             {dates.map(date => {
@@ -268,33 +266,23 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                     </div>
                                 </th>
                             )})}
-                            <th className="sticky right-0 z-20 bg-gray-50 px-4 py-3 text-center border-l border-gray-200 min-w-[100px] text-[11px] font-semibold text-gray-400 uppercase tracking-widest shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.05)]">
-                                Total
-                            </th>
                         </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
                         {Object.entries(membersByTeam).map(([teamName, { team, members }]) => (
                             <React.Fragment key={teamName}>
                                 <tr className="bg-gray-50/80">
-                                    <td className="sticky left-0 z-20 bg-gray-50 border-b border-r border-gray-200 px-6 py-2.5 font-medium text-sm text-gray-900 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
-                                        <div className="flex items-center gap-2">
-                                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: team?.color || '#9CA3AF' }}></div>
-                                            {teamName}
-                                            <div className="flex h-[18px] items-center justify-center rounded-[150px] bg-[#e5e7eb] px-2 min-w-[22px] ml-1">
-                                                <span className="font-semibold text-[#364153] text-[11px]">{members.length}</span>
-                                            </div>
-                                        </div>
+                                    <td colSpan={dates.length + 1} className="sticky left-0 z-20 bg-gray-50 border-b border-gray-200 px-6 py-2.5 font-medium text-sm text-gray-900 flex items-center gap-2">
+                                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: team?.color || '#9CA3AF' }}></div>
+                                        {teamName}
                                     </td>
-                                    <td colSpan={dates.length} className="border-b border-gray-200 bg-gray-50/80"></td>
-                                    <td className="sticky right-0 z-20 border-b border-l border-gray-200 bg-gray-50/80 shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.05)]"></td>
                                 </tr>
                                 {members.map(user => {
                                     const userTeam = team;
 
                                     return (
-                                <tr key={user.id} className="hover:bg-gray-50 group transition-colors">
-                                    <td className="sticky left-0 z-10 bg-white group-hover:bg-gray-50 transition-colors px-6 py-4 whitespace-nowrap border-r border-gray-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                                <tr key={user.id} className="hover:bg-gray-50">
+                                    <td className="sticky left-0 z-10 bg-white px-6 py-4 whitespace-nowrap border-r border-gray-200">
                                         <div className="flex items-center gap-3">
                                             <div
                                                 className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-medium"
@@ -338,13 +326,31 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                 }}
                                             >
                                                 <div className="space-y-1 cursor-pointer">
-                                                    <CapBar 
-                                                        hours={dayData.scheduledHours} 
-                                                        capacity={dayData.totalCapacity} 
-                                                        isLeave={dayData.leaveHours > 0} 
-                                                    />
+                                                    <div className="h-8 bg-gray-100 rounded relative overflow-hidden">
+                                                        {dayData.leaveHours > 0 ? (
+                                                            <div className="absolute inset-0 flex items-center justify-center bg-gray-200">
+                                                                <span className="text-xs text-gray-600 font-medium">On Leave</span>
+                                                            </div>
+                                                        ) : (
+                                                            <>
+                                                                <div
+                                                                    className="h-full transition-all"
+                                                                    style={{
+                                                                        width: `${Math.min(100, dayData.utilization)}%`,
+                                                                        backgroundColor: getWorkloadColor(dayData.status)
+                                                                    }}
+                                                                ></div>
+                                                                <div className="absolute inset-0 flex items-center justify-center">
+                                                                    <span className="text-xs font-medium text-gray-700">
+                                                                        {dayData.scheduledHours.toFixed(1)}h / {dayData.totalCapacity}h
+                                                                    </span>
+                                                                </div>
+                                                            </>
+                                                        )}
+                                                    </div>
+
                                                     {dayData.taskCount > 0 && (
-                                                        <div className="text-center text-[10px] text-gray-400 font-medium mt-1">
+                                                        <div className="text-center text-xs text-gray-500">
                                                             {dayData.taskCount} {dayData.taskCount === 1 ? 'task' : 'tasks'}
                                                         </div>
                                                     )}
@@ -393,40 +399,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                             </td>
                                         );
                                     })}
-                                    
-                                    {/* Total Column */}
-                                    <td className="sticky right-0 z-10 bg-white group-hover:bg-gray-50 transition-colors px-4 py-2 border-l border-gray-200 text-center align-middle shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.05)]">
-                                        {(() => {
-                                            const totalHours = dates.reduce((sum, d) => sum + (capacityData[user.id]?.[d]?.scheduledHours || 0), 0);
-                                            const totalCapacity = dates.reduce((sum, d) => sum + (capacityData[user.id]?.[d]?.totalCapacity || 8), 0);
-                                            const utilization = totalCapacity > 0 ? (totalHours / totalCapacity) * 100 : 0;
-                                            
-                                            let statusText = 'Available';
-                                            let statusColor = '#10b981'; // green
-                                            
-                                            if (utilization > 100) {
-                                                statusText = 'Overallocated';
-                                                statusColor = '#ef4444'; // red
-                                            } else if (utilization >= 80) {
-                                                statusText = 'Balanced'; 
-                                                statusColor = '#f59e0b'; // orange
-                                            }
-                                            
-                                            return (
-                                                <div className="flex flex-col items-center justify-center h-full">
-                                                    <div className="font-semibold text-sm leading-5" style={{ color: statusColor }}>
-                                                        {totalHours > 0 ? `${totalHours % 1 === 0 ? totalHours : totalHours.toFixed(1)}h` : '—'}
-                                                    </div>
-                                                    <div className="text-[10px] text-gray-400 mt-0.5 font-medium">
-                                                        {totalHours > 0 ? statusText : 'Available'}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })()}
-                                    </td>
-                                </tr>
-                            );
-                        })}
+                                    </tr>
+                                );
+                            })}
                         </React.Fragment>
                     ))}
                     </tbody>
@@ -560,9 +535,6 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                             <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2 mb-4">
                                 <div className="w-2 h-2 rounded-full" style={{ backgroundColor: team?.color || '#9CA3AF' }}></div>
                                 {teamName}
-                                <div className="flex h-[18px] items-center justify-center rounded-[150px] bg-[#e5e7eb] px-2 min-w-[22px] ml-1">
-                                    <span className="font-semibold text-[#364153] text-[11px]">{members.length}</span>
-                                </div>
                             </h3>
                             <div className="flex gap-4 items-start">
                                 {members.map(user => {
@@ -621,7 +593,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                     
                                                     {/* Status Badge */}
                                                     <div className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-200 text-gray-700 capitalize">
-                                                        {task.status.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
+                                                        {task.status.replace('_', ' ')}
                                                     </div>
                                                 </div>
 
@@ -644,65 +616,51 @@ export default function WorkloadDashboard({ currentUser }: Props) {
     };
 
     const renderTimelineView = () => {
-        const timelineBounds = getProjectTimelineBounds(activeTasks);
-        const timelineColumns = getTimelineColumns(timelineBounds, calendarView);
-        const totalDurationMs = timelineBounds.end.getTime() - timelineBounds.start.getTime();
 
-        // Group columns for the top header (e.g. Month for Day/Week scale, Year for Month scale)
-        const headerGroups: { name: string, count: number }[] = [];
-        let currentGroup = '';
+        // 2. Group dates by month (for the top header)
+        const monthGroups: { name: string, count: number }[] = [];
+        let currentMonth = '';
         let count = 0;
-
-        timelineColumns.forEach(col => {
-            let groupName = '';
-            if (calendarView === 'day' || calendarView === 'week') {
-                groupName = col.date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-            } else {
-                groupName = col.date.getFullYear().toString();
-            }
-
-            if (groupName !== currentGroup) {
-                if (currentGroup) headerGroups.push({ name: currentGroup, count });
-                currentGroup = groupName;
+        dates.forEach(d => {
+            const dateObj = new Date(d);
+            const monthStr = dateObj.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+            if (monthStr !== currentMonth) {
+                if (currentMonth) monthGroups.push({ name: currentMonth, count });
+                currentMonth = monthStr;
                 count = 1;
             } else {
                 count++;
             }
         });
-        if (currentGroup) headerGroups.push({ name: currentGroup, count });
-
-        const tableMinWidth = calendarView === 'day' ? timelineColumns.length * 48 : calendarView === 'week' ? timelineColumns.length * 100 : timelineColumns.length * 150;
+        if (currentMonth) monthGroups.push({ name: currentMonth, count });
 
         return (
             <TimelineContainer>
                 <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col max-h-[75vh]">
                     <div className="overflow-x-auto overflow-y-auto">
-                        <table className="border-collapse" style={{ tableLayout: 'fixed', minWidth: `${tableMinWidth + 256}px`, width: '100%' }}>
+                        <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
                         <thead className="bg-white sticky top-0 z-30 shadow-sm">
-                            {/* Top Header Row */}
+                            {/* Month Header Row */}
                             <tr>
                                 <th className="w-64 min-w-[256px] sticky left-0 z-40 bg-white border-r border-b border-gray-200 px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">
                                     Team Member
                                 </th>
-                                {headerGroups.map((hg, i) => (
-                                    <th key={i} colSpan={hg.count} className="border-r border-b border-gray-200 px-4 py-2 text-center text-xs font-semibold text-gray-700 bg-gray-50">
-                                        {hg.name}
+                                {monthGroups.map((mg, i) => (
+                                    <th key={i} colSpan={mg.count} className="border-r border-b border-gray-200 px-4 py-2 text-center text-xs font-semibold text-gray-700 bg-gray-50">
+                                        {mg.name}
                                     </th>
                                 ))}
                             </tr>
-                            {/* Column Header Row */}
+                            {/* Days Header Row */}
                             <tr>
                                 <th className="w-64 min-w-[256px] sticky left-0 z-40 bg-white border-r border-b border-gray-200"></th>
-                                {timelineColumns.map((col, idx) => {
-                                    const isToday = col.date <= new Date() && col.endDate >= new Date();
-                                    const startOffset = Math.max(0, col.date.getTime() - timelineBounds.start.getTime());
-                                    const endOffset = Math.min(totalDurationMs, col.endDate.getTime() - timelineBounds.start.getTime());
-                                    const widthPercent = ((endOffset - startOffset) / totalDurationMs) * 100;
-                                    
+                                {dates.map((date, idx) => {
+                                    const dateObj = new Date(date);
+                                    const isToday = date === new Date().toISOString().split('T')[0];
                                     return (
-                                        <th key={idx} style={{ width: `${widthPercent}%` }} className={`border-r border-b border-gray-200 px-1 py-1 text-center text-[10px] font-medium ${isToday ? 'bg-blue-50 text-blue-600' : 'bg-white text-gray-500'}`}>
-                                            <div>{col.subLabel}</div>
-                                            <div className={isToday ? 'font-bold' : ''}>{col.label}</div>
+                                        <th key={idx} className={`w-12 min-w-[48px] border-r border-b border-gray-200 px-1 py-1 text-center text-[10px] font-medium ${isToday ? 'bg-blue-50 text-blue-600' : 'bg-white text-gray-500'}`}>
+                                            <div>{dateObj.toLocaleDateString('en-US', { weekday: 'narrow' })}</div>
+                                            <div className={isToday ? 'font-bold' : ''}>{dateObj.getDate()}</div>
                                         </th>
                                     );
                                 })}
@@ -713,27 +671,13 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                 <React.Fragment key={teamName}>
                                     {/* Team Header Row */}
                                     <tr className="bg-gray-50/80">
-                                        <td className="sticky left-0 z-20 bg-gray-50 border-r border-b border-gray-200 px-4 py-2.5 font-medium text-sm text-gray-900">
-                                            <div className="flex items-center gap-2">
-                                                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: team?.color || '#9CA3AF' }}></div>
-                                                {teamName}
-                                                <div className="flex h-[18px] items-center justify-center rounded-[150px] bg-[#e5e7eb] px-2 min-w-[22px] ml-1">
-                                                    <span className="font-semibold text-[#364153] text-[11px]">{members.length}</span>
-                                                </div>
-                                            </div>
+                                        <td className="sticky left-0 z-20 bg-gray-50 border-r border-b border-gray-200 px-4 py-2.5 font-medium text-sm text-gray-900 flex items-center gap-2">
+                                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: team?.color || '#9CA3AF' }}></div>
+                                            {teamName}
                                         </td>
-                                        <td colSpan={timelineColumns.length} className="border-r border-b border-gray-200 bg-gray-50/50 p-0 relative">
-                                            <div className="absolute inset-0 flex">
-                                                {timelineColumns.map((col, idx) => {
-                                                    const startOffset = Math.max(0, col.date.getTime() - timelineBounds.start.getTime());
-                                                    const endOffset = Math.min(totalDurationMs, col.endDate.getTime() - timelineBounds.start.getTime());
-                                                    const widthPercent = ((endOffset - startOffset) / totalDurationMs) * 100;
-                                                    return (
-                                                        <div key={idx} style={{ width: `${widthPercent}%` }} className={`border-r border-gray-200 ${col.isWeekend ? 'bg-gray-100/50' : ''}`}></div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </td>
+                                        {dates.map((date, idx) => (
+                                            <td key={idx} className="border-r border-b border-gray-200 bg-gray-50/50"></td>
+                                        ))}
                                     </tr>
                                     
                                     {/* Member Rows */}
@@ -749,6 +693,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                         userTasks.forEach((task, idx) => {
                                             const startDate = new Date(task.proposedStartDate!).getTime();
                                             let track = 0;
+                                            // Find first available track
                                             while (true) {
                                                 const conflict = userTasks.slice(0, idx).some((prevTask, prevIdx) => {
                                                     if (trackAssignments[prevIdx] !== track) return false;
@@ -780,14 +725,12 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                 </td>
                                                 
                                                 {/* Task Rendering Area */}
-                                                <td colSpan={timelineColumns.length} className="relative border-b border-gray-200 p-0" style={{ height: `${rowHeight}px` }}>
+                                                <td colSpan={dates.length} className="relative border-b border-gray-200 p-0" style={{ height: `${rowHeight}px` }}>
                                                     <div className="absolute inset-0 flex">
-                                                        {timelineColumns.map((col, idx) => {
-                                                            const startOffset = Math.max(0, col.date.getTime() - timelineBounds.start.getTime());
-                                                            const endOffset = Math.min(totalDurationMs, col.endDate.getTime() - timelineBounds.start.getTime());
-                                                            const widthPercent = ((endOffset - startOffset) / totalDurationMs) * 100;
+                                                        {dates.map((date, idx) => {
+                                                            const isWeekend = new Date(date).getDay() === 0 || new Date(date).getDay() === 6;
                                                             return (
-                                                                <div key={idx} style={{ width: `${widthPercent}%` }} className={`border-r border-gray-200 ${col.isWeekend ? 'bg-gray-50/50' : ''}`}></div>
+                                                                <div key={idx} className={`flex-1 border-r border-gray-200 ${isWeekend ? 'bg-gray-50/50' : ''}`}></div>
                                                             );
                                                         })}
                                                     </div>
@@ -796,20 +739,21 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                         {userTasks.map((task, idx) => {
                                                             const startDate = new Date(task.proposedStartDate!);
                                                             const endDate = new Date(task.proposedEndDate!);
-                                                            
-                                                            const rangeStart = timelineBounds.start.getTime();
-                                                            const rangeEnd = timelineBounds.end.getTime();
+                                                            const rangeStart = new Date(dates[0]);
+                                                            const rangeEnd = new Date(dates[dates.length - 1]);
+                                                            rangeEnd.setHours(23, 59, 59, 999);
 
-                                                            if (endDate.getTime() < rangeStart || startDate.getTime() > rangeEnd) return null; // Outside view
+                                                            if (endDate < rangeStart || startDate > rangeEnd) return null; // Outside view
 
-                                                            const taskStart = Math.max(startDate.getTime(), rangeStart);
-                                                            const taskEnd = Math.min(endDate.getTime(), rangeEnd);
+                                                            const taskStart = Math.max(startDate.getTime(), rangeStart.getTime());
+                                                            const taskEnd = Math.min(endDate.getTime(), rangeEnd.getTime());
+                                                            const totalRange = rangeEnd.getTime() - rangeStart.getTime();
                                                             
-                                                            const left = ((taskStart - rangeStart) / totalDurationMs) * 100;
-                                                            let width = ((taskEnd - taskStart) / totalDurationMs) * 100;
+                                                            const left = ((taskStart - rangeStart.getTime()) / totalRange) * 100;
+                                                            let width = ((taskEnd - taskStart) / totalRange) * 100;
                                                             
                                                             // Give minimum width for visibility
-                                                            width = Math.max(width, 0.5);
+                                                            width = Math.max(width, (1 / dates.length) * 100);
                                                             
                                                             const isCompleted = task.status === 'completed';
                                                             const track = trackAssignments[idx];
@@ -852,256 +796,319 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         );
     };
 
-    
-    const activeCount = filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length;
-    
-    const totalMembers = teamMembers.length;
-    const availableMembers = teamMembers.filter(user => {
-        const today = dates[0];
-        const capacity = capacityData[user.id]?.[today];
-        return capacity && capacity.status === 'available';
-    }).length;
-    const nearCapacityMembers = teamMembers.filter(user => {
-        const today = dates[0];
-        const capacity = capacityData[user.id]?.[today];
-        return capacity && capacity.status === 'near_capacity';
-    }).length;
-    const overallocatedMembers = teamMembers.filter(user => {
-        const today = dates[0];
-        const capacity = capacityData[user.id]?.[today];
-        return capacity && capacity.status === 'overallocated';
-    }).length;
-
-    const PRIORITIES: Priority[] = ['urgent', 'high', 'normal', 'low'];
-    const STATUSES: string[] = ['scheduled', 'in_progress', 'in_review', 'on_hold', 'completed'];
-
     return (
-        <div className="min-h-screen font-sans" style={{ backgroundColor: '#f9fafb' }}>
+        <div className="space-y-6">
             {/* Header */}
-            <div className="bg-white border-b border-gray-100">
-                <div className="max-w-screen-xl mx-auto w-full px-8 pt-5 pb-3">
-                    
-                    {/* Row 1: title + KPIs */}
-                    <div className="flex items-start justify-between gap-8 mb-4">
-                        <div className="shrink-0">
-                            <h1 className="text-lg font-semibold text-gray-900 tracking-tight">Team Workload</h1>
-                            <p className="text-sm text-gray-400 mt-0.5">Lifetime overview</p>
-                        </div>
-                        <div className="flex items-center gap-6">
-                            {[
-                                { label: 'Total Members',   value: totalMembers,         color: '#111827' },
-                                { label: 'Available',       value: availableMembers,     color: '#10b981' },
-                                { label: 'Near Capacity',   value: nearCapacityMembers,  color: '#f59e0b' },
-                                { label: 'Overallocated',   value: overallocatedMembers, color: '#ef4444' },
-                            ].map(({ label, value, color }) => (
-                                <div key={label} className="text-center shrink-0">
-                                    <div className="text-xl font-semibold tabular-nums leading-none" style={{ color }}>{value}</div>
-                                    <div className="text-[11px] text-gray-400 mt-1 whitespace-nowrap">{label}</div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
+            <div className="flex items-center justify-between">
+                <div>
+                    <h1 className="text-2xl font-semibold text-gray-900">Team Workload</h1>
+                    <p className="text-sm text-gray-600 mt-1">View and manage team capacity and task assignments</p>
+                </div>
 
-                    {/* Row 2: controls */}
-                    <div className="flex items-center gap-3 border-t border-gray-100 pt-3">
-                        {/* Team */}
-                        <select
-                            value={selectedTeamId}
-                            onChange={e => setSelectedTeamId(e.target.value)}
-                            className="h-8 pl-3 pr-7 text-xs text-gray-700 bg-white border border-gray-200 rounded-lg appearance-none focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer"
-                            style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' stroke='%239ca3af' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
-                        >
-                            <option value="all">All Teams</option>
-                            {visibleTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                        </select>
-
-                        {viewMode === 'calendar' && (
-                            <>
-                                {/* Timescale */}
-                                <div className="flex items-center h-8 bg-gray-100 rounded-lg p-0.5">
-                                    {(['day', 'week', 'month'] as CalendarView[]).map(s => (
-                                        <button key={s} onClick={() => setCalendarView(s)}
-                                            className={`px-3 h-full rounded-md text-xs font-medium transition-colors ${calendarView === s ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                                            {s.charAt(0).toUpperCase() + s.slice(1)}
-                                        </button>
-                                    ))}
-                                </div>
-
-                                {/* Weekends */}
-                                <button onClick={() => setShowWeekends(!showWeekends)} className="flex items-center gap-2 group">
-                                    <div className={`rounded-full relative transition-colors flex items-center px-0.5 ${showWeekends ? 'bg-blue-500' : 'bg-gray-200'}`}
-                                        style={{ width: 32, height: 18 }}>
-                                        <span className={`w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform duration-200 ${showWeekends ? 'translate-x-3.5' : 'translate-x-0'}`} />
-                                    </div>
-                                    <span className="text-xs text-gray-500 group-hover:text-gray-700 transition-colors">Weekends</span>
-                                </button>
-                            </>
-                        )}
-
-                        <div className="flex-1" />
-                        <div className="w-px h-6 bg-gray-200" />
-
-                        {/* Filter button */}
-                        <button
-                            onClick={() => setShowFilters(v => !v)}
-                            className={`inline-flex items-center gap-2 h-8 px-3 rounded-lg border text-xs font-medium transition-all ${
-                                showFilters || activeCount > 0
-                                    ? 'bg-blue-50 border-blue-200 text-blue-700'
-                                    : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300 hover:text-gray-800'
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={() => setShowFilters(!showFilters)}
+                        className={`px-4 py-2 border rounded-lg text-sm font-medium hover:bg-gray-50 flex items-center gap-2 ${showFilters ? 'border-blue-500 text-blue-700 bg-blue-50' : 'border-gray-300 text-gray-700'
                             }`}
-                        >
-                            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                                <path d="M1.5 3.5h10M3.5 6.5h6M5.5 9.5h2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-                            </svg>
-                            Filter
-                            {activeCount > 0 && (
-                                <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-blue-600 text-white text-[10px] font-bold leading-none">
-                                    {activeCount}
-                                </span>
-                            )}
-                        </button>
+                    >
+                        <Filter className="w-4 h-4" />
+                        Filters
+                        {(filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length > 0) && (
+                            <span className="bg-blue-100 text-blue-700 py-0.5 px-2 rounded-full text-xs">
+                                {filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length}
+                            </span>
+                        )}
+                    </button>
 
-                        <div className="w-px h-6 bg-gray-200" />
+                </div>
+            </div>
 
-                        {/* View */}
-                        <div className="flex items-center h-8 bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                            {(['calendar', 'list', 'board', 'timeline'] as ViewMode[]).map(key => (
-                                <button key={key} title={key} onClick={() => setViewMode(key)}
-                                    className={`w-7 h-full flex items-center justify-center rounded-md transition-all ${viewMode === key ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}>
-                                    {ViewIcons[key as keyof typeof ViewIcons]}
-                                </button>
-                            ))}
-                        </div>
+            {/* Summary Stats - Moved to top */}
+            <div className="grid grid-cols-4 gap-4">
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                    <div className="text-sm text-gray-600">Total Team Members</div>
+                    <div className="text-2xl font-semibold text-gray-900 mt-1">{teamMembers.length}</div>
+                </div>
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                    <div className="text-sm text-gray-600">Available Members</div>
+                    <div className="text-2xl font-semibold text-green-600 mt-1">
+                        {teamMembers.filter(user => {
+                            const today = dates[0];
+                            const capacity = capacityData[user.id]?.[today];
+                            return capacity && capacity.status === 'available';
+                        }).length}
+                    </div>
+                </div>
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                    <div className="text-sm text-gray-600">Near Capacity</div>
+                    <div className="text-2xl font-semibold text-orange-600 mt-1">
+                        {teamMembers.filter(user => {
+                            const today = dates[0];
+                            const capacity = capacityData[user.id]?.[today];
+                            return capacity && capacity.status === 'near_capacity';
+                        }).length}
+                    </div>
+                </div>
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                    <div className="text-sm text-gray-600">Overallocated</div>
+                    <div className="text-2xl font-semibold text-red-600 mt-1">
+                        {teamMembers.filter(user => {
+                            const today = dates[0];
+                            const capacity = capacityData[user.id]?.[today];
+                            return capacity && capacity.status === 'overallocated';
+                        }).length}
                     </div>
                 </div>
             </div>
 
-            {/* Filter panel */}
+            {/* Filters Panel */}
             {showFilters && (
-                <div className="bg-white border-b border-gray-100 w-full">
-                    <div className="max-w-screen-xl mx-auto w-full px-8 py-4 flex items-start gap-8 flex-wrap">
-                        
-                        {/* Priority */}
-                        <div className="flex flex-col gap-2">
-                            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Priority</span>
-                            <div className="flex items-center gap-1 flex-wrap">
-                                {PRIORITIES.map(p => (
-                                    <PriorityPill key={p} priority={p as Priority}
-                                        active={filterPriority.includes(p)} 
-                                        onClick={() => {
-                                            if (filterPriority.includes(p)) setFilterPriority(filterPriority.filter(x => x !== p));
-                                            else setFilterPriority([...filterPriority, p]);
-                                        }} 
-                                    />
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                    <div className="grid grid-cols-5 gap-6">
+                        <div>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Priority</label>
+                            <div className="space-y-2">
+                                {['urgent', 'high', 'normal', 'low'].map(priority => (
+                                    <label key={priority} className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={filterPriority.includes(priority)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setFilterPriority([...filterPriority, priority]);
+                                                } else {
+                                                    setFilterPriority(filterPriority.filter(p => p !== priority));
+                                                }
+                                            }}
+                                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <span className="text-sm text-gray-700 capitalize">{priority}</span>
+                                    </label>
                                 ))}
                             </div>
                         </div>
 
-                        <div className="w-px self-stretch bg-gray-100 shrink-0" />
-
-                        {/* Status */}
-                        <div className="flex flex-col gap-2">
-                            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Status</span>
-                            <div className="flex items-center gap-1 flex-wrap">
-                                {STATUSES.map(s => (
-                                    <Pill key={s} label={s.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')} color={STATUS_CONFIG[s]?.color || '#94a3b8'} dot
-                                        active={filterStatus.includes(s)} 
-                                        onClick={() => {
-                                            if (filterStatus.includes(s)) setFilterStatus(filterStatus.filter(x => x !== s));
-                                            else setFilterStatus([...filterStatus, s]);
-                                        }} 
-                                    />
+                        <div>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Status</label>
+                            <div className="space-y-2">
+                                {['scheduled', 'in_progress', 'on_hold'].map(status => (
+                                    <label key={status} className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={filterStatus.includes(status)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setFilterStatus([...filterStatus, status]);
+                                                } else {
+                                                    setFilterStatus(filterStatus.filter(s => s !== status));
+                                                }
+                                            }}
+                                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <span className="text-sm text-gray-700">{formatStatusLabel(status)}</span>
+                                    </label>
                                 ))}
                             </div>
                         </div>
 
-                        <div className="w-px self-stretch bg-gray-100 shrink-0" />
-
-                        {/* Brand */}
-                        <div className="flex flex-col gap-2">
-                            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Brand</span>
-                            <div className="flex items-center gap-1 flex-wrap">
-                                {clients.map(b => {
-                                    const bName = b.name as Brand;
-                                    const domainMap: Record<string, string> = {
-                                        'CareStack': 'carestack.com',
-                                        'VoiceStack': 'voicestack.com',
-                                        'OS Dental': 'osdental.com', // fallback domains
-                                        'ACE DSN': 'acedsn.com',
-                                        'Aeka': 'aeka.com'
-                                    };
-                                    let domain = '';
-                                    try {
-                                        if (b.website) domain = new URL(b.website).hostname;
-                                    } catch (e) {}
-                                    if (!domain) domain = domainMap[bName];
-                                    const logoUrl = b.favicon || (domain ? `https://logo.clearbit.com/${domain}` : undefined);
-                                    
-                                    return (
-                                    <Pill key={b.id} label={b.name} color={BRAND_CONFIG[bName]?.color || '#3b82f6'}
-                                        logoUrl={logoUrl}
-                                        active={filterBrand.includes(b.id)} 
-                                        onClick={() => {
-                                            if (filterBrand.includes(b.id)) setFilterBrand(filterBrand.filter(x => x !== b.id));
-                                            else setFilterBrand([...filterBrand, b.id]);
-                                        }} 
-                                    />
-                                )})}
-                            </div>
-                        </div>
-
-                        <div className="w-px self-stretch bg-gray-100 shrink-0" />
-
-                        {/* Region */}
-                        <div className="flex flex-col gap-2">
-                            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Region</span>
-                            <div className="flex items-center gap-1 flex-wrap">
-                                {(['USA', 'UK', 'AU'] as Region[]).map(r => (
-                                    <Pill key={r} label={r} color="#475569" prefix={`${REGION_CONFIG[r]?.flag} `}
-                                        active={filterRegion.includes(r)} 
-                                        onClick={() => {
-                                            if (filterRegion.includes(r)) setFilterRegion(filterRegion.filter(x => x !== r));
-                                            else setFilterRegion([...filterRegion, r]);
-                                        }} 
-                                    />
+                        <div>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Brand</label>
+                            <div className="space-y-2 max-h-32 overflow-y-auto">
+                                {clients.map(brand => (
+                                    <label key={brand.id} className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={filterBrand.includes(brand.id)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setFilterBrand([...filterBrand, brand.id]);
+                                                } else {
+                                                    setFilterBrand(filterBrand.filter(c => c !== brand.id));
+                                                }
+                                            }}
+                                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <span className="text-sm text-gray-700">{brand.name}</span>
+                                    </label>
                                 ))}
                             </div>
                         </div>
 
-                        {activeCount > 0 && (
-                            <>
-                                <div className="w-px self-stretch bg-gray-100 shrink-0" />
-                                <div className="flex flex-col gap-2">
-                                    <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest opacity-0">·</span>
-                                    <button 
-                                        onClick={() => {
-                                            setFilterPriority([]);
-                                            setFilterStatus([]);
-                                            setFilterBrand([]);
-                                            setFilterRegion([]);
-                                            setFilterTag([]);
-                                        }}
-                                        className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md text-xs font-medium text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-all border border-transparent hover:border-gray-200"
-                                    >
-                                        <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
-                                            <path d="M1 1l7 7M8 1L1 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-                                        </svg>
-                                        Clear all
-                                    </button>
-                                </div>
-                            </>
-                        )}
+                        <div>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Region</label>
+                            <div className="space-y-2 max-h-32 overflow-y-auto">
+                                {regions.map(region => (
+                                    <label key={region.id} className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={filterRegion.includes(region.id)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setFilterRegion([...filterRegion, region.id]);
+                                                } else {
+                                                    setFilterRegion(filterRegion.filter(r => r !== region.id));
+                                                }
+                                            }}
+                                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <span className="text-sm text-gray-700">{region.name}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="text-sm font-medium text-gray-700 mb-2 block">Tags</label>
+                            <div className="space-y-2 max-h-32 overflow-y-auto">
+                                {allTags.map(tag => (
+                                    <label key={tag.id} className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={filterTag.includes(tag.id)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setFilterTag([...filterTag, tag.id]);
+                                                } else {
+                                                    setFilterTag(filterTag.filter(t => t !== tag.id));
+                                                }
+                                            }}
+                                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <span className="text-sm text-gray-700">{tag.name}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="mt-4 pt-4 border-t border-gray-200 flex items-center justify-end gap-2">
+                        <button
+                            onClick={() => {
+                                setFilterPriority([]);
+                                setFilterStatus([]);
+                                setFilterBrand([]);
+                                setFilterRegion([]);
+                                setFilterTag([]);
+                            }}
+                            className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900"
+                        >
+                            Clear All
+                        </button>
                     </div>
                 </div>
             )}
 
-            {/* Render Views */}
-            <div className="max-w-screen-xl mx-auto px-8 py-6 w-full">
-                {viewMode === 'calendar' && renderCalendarView()}
-                {viewMode === 'list' && renderListView()}
-                {viewMode === 'board' && renderBoardView()}
-                {viewMode === 'timeline' && renderTimelineView()}
+            {/* Filters and View Mode */}
+            <div className="bg-white rounded-lg border border-gray-200 p-4">
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                        <label className="text-sm font-medium text-gray-700">Team:</label>
+                        <select
+                            value={selectedTeamId}
+                            onChange={(e) => setSelectedTeamId(e.target.value)}
+                            className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                        >
+                            <option value="all">All Teams</option>
+                            {visibleTeams.map(team => (
+                                <option key={team.id} value={team.id}>{team.name}</option>
+                            ))}
+                        </select>
+
+                        {viewMode === 'calendar' && (
+                            <>
+                                <div className="h-6 w-px bg-gray-300"></div>
+                                <div className="flex items-center gap-2">
+                                    {(['day', 'week', 'month'] as CalendarView[]).map(view => (
+                                        <button
+                                            key={view}
+                                            onClick={() => setCalendarView(view)}
+                                            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${calendarView === view
+                                                    ? 'bg-blue-100 text-blue-700'
+                                                    : 'text-gray-600 hover:bg-gray-100'
+                                                }`}
+                                        >
+                                            {view.charAt(0).toUpperCase() + view.slice(1)}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                <div className="h-6 w-px bg-gray-300"></div>
+                                <label className="flex items-center gap-2">
+                                    <input
+                                        type="checkbox"
+                                        checked={showWeekends}
+                                        onChange={(e) => setShowWeekends(e.target.checked)}
+                                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                    />
+                                    <span className="text-sm text-gray-700">Show Weekends</span>
+                                </label>
+                            </>
+                        )}
+                    </div>
+
+                    {/* View Mode Selector */}
+                    <div className="flex items-center p-1 bg-[#F8F9FA] rounded-xl">
+                        <button
+                            onClick={() => setViewMode('calendar')}
+                            className={`p-2 rounded-lg transition-all flex items-center justify-center ${viewMode === 'calendar' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
+                            title="Capacity View"
+                        >
+                            <Calendar className="w-5 h-5" strokeWidth={1.5} />
+                        </button>
+                        <button
+                            onClick={() => setViewMode('list')}
+                            className={`p-2 rounded-lg transition-all flex items-center justify-center ${viewMode === 'list' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
+                            title="List View"
+                        >
+                            <List className="w-5 h-5" strokeWidth={1.5} />
+                        </button>
+                        <button
+                            onClick={() => setViewMode('board')}
+                            className={`p-2 rounded-lg transition-all flex items-center justify-center ${viewMode === 'board' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
+                            title="Board View"
+                        >
+                            <LayoutGrid className="w-5 h-5" strokeWidth={1.5} />
+                        </button>
+                        <button
+                            onClick={() => setViewMode('timeline')}
+                            className={`p-2 rounded-lg transition-all flex items-center justify-center ${viewMode === 'timeline' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100/50'}`}
+                            title="Timeline View"
+                        >
+                            <GanttChart className="w-5 h-5" strokeWidth={1.5} />
+                        </button>
+                    </div>
+                </div>
             </div>
+
+            {/* Legend - only show for capacity view */}
+            {viewMode === 'calendar' && (
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                    <div className="flex items-center gap-6 text-sm">
+                        <div className="flex items-center gap-2">
+                            <div className="w-3 h-3 rounded" style={{ backgroundColor: '#10B981' }}></div>
+                            <span className="text-gray-600">0-49% Available</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-3 h-3 rounded" style={{ backgroundColor: '#3B82F6' }}></div>
+                            <span className="text-gray-600">50-79% Balanced</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-3 h-3 rounded" style={{ backgroundColor: '#F59E0B' }}></div>
+                            <span className="text-gray-600">80-100% Near Capacity</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-3 h-3 rounded" style={{ backgroundColor: '#EF4444' }}></div>
+                            <span className="text-gray-600">100%+ Overallocated</span>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Render selected view */}
+            {viewMode === 'calendar' && renderCalendarView()}
+            {viewMode === 'list' && renderListView()}
+            {viewMode === 'board' && renderBoardView()}
+            {viewMode === 'timeline' && renderTimelineView()}
 
             {/* Task Details Panel */}
             <TaskDetailsPanel
@@ -1116,5 +1123,4 @@ export default function WorkloadDashboard({ currentUser }: Props) {
             />
         </div>
     );
-
 }

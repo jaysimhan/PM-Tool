@@ -11,6 +11,7 @@ export type TaskStatus =
     | 'accepted'
     | 'scheduled'
     | 'in_progress'
+    | 'in_review'
     | 'waiting_for_information'
     | 'waiting_for_approval'
     | 'blocked'
@@ -39,10 +40,10 @@ export interface Team {
     id: string;
     name: string;
     description: string;
-    leaderId: string;
     memberIds: string[];
     skillIds: string[];
     color: string;
+    isHomeTeam: boolean; // the one team the sole super_admin always belongs to
 }
 
 export interface Skill {

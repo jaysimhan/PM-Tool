@@ -13,9 +13,6 @@ export default function Reports({ currentUser }: Props) {
     const [activeTab, setActiveTab] = useState<'reports' | 'team'>('reports');
 
     const hasTeam = useMemo(() => {
-        if (currentUser.role === 'team_leader') {
-            return teams.some(t => t.leaderId === currentUser.id);
-        }
         return teams.some(t => t.memberIds.includes(currentUser.id));
     }, [currentUser]);
 

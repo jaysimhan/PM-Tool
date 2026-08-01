@@ -3,11 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { User, Task } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { ChevronLeft, ChevronRight, ChevronDown, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
-import { getPriorityColor, getStatusBadgeColor, formatStatusLabel, getDatesInRange } from '../utils/capacityCalculations';
+import { getDatesInRange, getPriorityColor, getTimelineColumns, getProjectTimelineBounds, getStatusBadgeColor, formatStatusLabel } from '../utils/capacityCalculations';
 import TaskDetailsPanel from './TaskDetailsPanel';
+import TimelineView from './TimelineView';
 import { TimelineContainer } from './TimelineContainer';
 import { getTagStyle } from '../utils/colors';
-
+import { 
+    Priority, Status, 
+    PRIORITY_CONFIG, STATUS_CONFIG, 
+    PriorityPill, Pill, ViewIcons 
+} from './WorkloadDashboardHelpers';
 interface Props {
   currentUser: User;
 }
@@ -77,9 +82,6 @@ export default function CalendarView({ currentUser }: Props) {
     if (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager') {
       return teams;
     }
-    if (currentUser.role === 'team_leader') {
-      return teams.filter(t => t.leaderId === currentUser.id);
-    }
     return teams.filter(t => t.memberIds.includes(currentUser.id));
   }, [currentUser]);
 
@@ -146,7 +148,7 @@ export default function CalendarView({ currentUser }: Props) {
     }
 
     return filtered;
-  }, [filterTeam, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, pageMode, sortBy, sortDirection]);
+  }, [filterTeam, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, pageMode, sortBy, sortDirection, tasks, visibleTeams, users, currentUser]);
 
   const handleTaskClick = (task: Task) => {
     setSelectedTask(task);
@@ -483,183 +485,10 @@ export default function CalendarView({ currentUser }: Props) {
   };
 
   const renderTimelineView = () => {
-    // We will show days for the current month
-    const start = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
-    const startDateStr = start.toISOString().split('T')[0];
-    
-    // Get number of days in the current month
-    const daysInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
-    const dates = getDatesInRange(startDateStr, daysInMonth);
-
-    // Group dates by month (for the top header)
-    const monthGroups: { name: string, count: number }[] = [];
-    let currentMonth = '';
-    let count = 0;
-    dates.forEach(d => {
-        const dateObj = new Date(d);
-        const monthStr = dateObj.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-        if (monthStr !== currentMonth) {
-            if (currentMonth) monthGroups.push({ name: currentMonth, count });
-            currentMonth = monthStr;
-            count = 1;
-        } else {
-            count++;
-        }
-    });
-    if (currentMonth) monthGroups.push({ name: currentMonth, count });
-
-    // Group by WorkCategory
-    const tasksByCategory = filteredTasks.reduce((acc, task) => {
-        const category = workCategories.find(c => c.id === task.categoryId);
-        const catName = category?.name || 'Uncategorized';
-        if (!acc[catName]) {
-            acc[catName] = { category, tasks: [] };
-        }
-        acc[catName].tasks.push(task);
-        return acc;
-    }, {} as Record<string, { category: typeof workCategories[0] | undefined, tasks: Task[] }>);
-
     return (
-        <TimelineContainer>
-            <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
-                <thead className="bg-white sticky top-0 z-30 shadow-sm">
-                    {/* Month Header Row */}
-                    <tr>
-                        <th className="w-80 min-w-[320px] sticky left-0 z-40 bg-white border-r border-b border-gray-200 px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">
-                            Task List
-                        </th>
-                        {monthGroups.map((mg, i) => (
-                            <th key={i} colSpan={mg.count} className="border-r border-b border-gray-200 px-4 py-2 text-center text-xs font-semibold text-gray-700 bg-gray-50">
-                                {mg.name}
-                            </th>
-                        ))}
-                    </tr>
-                    {/* Days Header Row */}
-                    <tr>
-                        <th className="w-80 min-w-[320px] sticky left-0 z-40 bg-white border-r border-b border-gray-200"></th>
-                        {dates.map((date, idx) => {
-                            const dateObj = new Date(date);
-                            const isToday = date === new Date().toISOString().split('T')[0];
-                            return (
-                                <th key={idx} className={`w-12 min-w-[48px] border-r border-b border-gray-200 px-1 py-1 text-center text-[10px] font-medium ${isToday ? 'bg-blue-50 text-blue-600' : 'bg-white text-gray-500'}`}>
-                                    <div>{dateObj.toLocaleDateString('en-US', { weekday: 'narrow' })}</div>
-                                    <div className={isToday ? 'font-bold' : ''}>{dateObj.getDate()}</div>
-                                </th>
-                            );
-                        })}
-                    </tr>
-                </thead>
-                <tbody className="bg-white">
-                    {Object.entries(tasksByCategory).map(([catName, { category, tasks: catTasks }]) => (
-                        <React.Fragment key={catName}>
-                            {/* Category Header Row */}
-                            <tr className="bg-gray-50/50">
-                                <td className="w-80 min-w-[320px] sticky left-0 z-20 bg-gray-50/50 border-r border-b border-gray-200 px-4 py-3 font-semibold text-gray-900 flex items-center gap-2">
-                                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: '#6B7280' }} />
-                                    {catName}
-                                </td>
-                                <td colSpan={dates.length} className="border-r border-b border-gray-200 bg-gray-50/50"></td>
-                            </tr>
-                            {/* Category Tasks */}
-                            {catTasks.map(task => {
-                                const assignedUser = task.assignedToId ? users.find(u => u.id === task.assignedToId) : null;
-                                const userTeam = assignedUser ? getUserTeam(assignedUser.id) : null;
-                                return (
-                                    <tr key={task.id} className="hover:bg-gray-50/30 group">
-                                        <td className="w-80 min-w-[320px] sticky left-0 z-20 bg-white group-hover:bg-gray-50/30 border-r border-b border-gray-200 px-4 py-2">
-                                            <div className="flex items-center gap-3">
-                                                {/* Assigned User Avatar */}
-                                                {assignedUser ? (
-                                                    <div 
-                                                        className="w-6 h-6 rounded-full flex flex-shrink-0 items-center justify-center text-white text-[10px] font-medium border-2 border-white shadow-sm"
-                                                        style={{ backgroundColor: userTeam?.color || '#6B7280' }}
-                                                        title={`${assignedUser.name} (${userTeam?.name || 'No Team'})`}
-                                                    >
-                                                        {assignedUser.name.split(' ').map(n => n[0]).join('')}
-                                                    </div>
-                                                ) : (
-                                                    <div className="w-6 h-6 rounded-full bg-gray-100 flex-shrink-0 border-2 border-white shadow-sm flex items-center justify-center" title="Unassigned">
-                                                        <UserIcon className="w-3 h-3 text-gray-400" />
-                                                    </div>
-                                                )}
-                                                <div className="min-w-0">
-                                                    <div className="text-sm font-medium text-gray-900 truncate" title={task.title}>{task.title}</div>
-                                                    <div className="text-[10px] text-gray-500 truncate flex items-center gap-2">
-                                                        <span>{formatStatusLabel(task.status)}</span>
-                                                        <span className="text-gray-300">•</span>
-                                                        <span className="uppercase" style={{ color: getPriorityColor(task.priority) }}>{task.priority || 'Normal'}</span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td colSpan={dates.length} className="border-r border-b border-gray-200 p-0 relative h-12">
-                                            {/* Grid Lines */}
-                                            <div className="absolute inset-0 flex pointer-events-none">
-                                                {dates.map((d, i) => (
-                                                    <div key={i} className={`flex-1 border-r border-gray-100/50 ${d === new Date().toISOString().split('T')[0] ? 'bg-blue-50/20 border-blue-100' : ''}`} />
-                                                ))}
-                                            </div>
-                                            {/* Task Bar */}
-                                            <div className="relative w-full h-full flex items-center">
-                                                {(() => {
-                                                    const startDate = new Date(task.proposedStartDate!);
-                                                    const endDate = new Date(task.proposedEndDate!);
-                                                    const rangeStart = new Date(dates[0]);
-                                                    const rangeEnd = new Date(dates[dates.length - 1]);
-                                                    rangeEnd.setHours(23, 59, 59, 999);
-
-                                                    if (endDate < rangeStart || startDate > rangeEnd) return null; // Outside view
-
-                                                    const taskStart = Math.max(startDate.getTime(), rangeStart.getTime());
-                                                    const taskEnd = Math.min(endDate.getTime(), rangeEnd.getTime());
-                                                    const totalRange = rangeEnd.getTime() - rangeStart.getTime();
-                                                    
-                                                    const left = ((taskStart - rangeStart.getTime()) / totalRange) * 100;
-                                                    let width = ((taskEnd - taskStart) / totalRange) * 100;
-                                                    
-                                                    // Give minimum width for visibility
-                                                    width = Math.max(width, (1 / dates.length) * 100);
-                                                    
-                                                    const isCompleted = task.status === 'completed';
-                                                    const priorityColor = getPriorityColor(task.priority);
-
-                                                    return (
-                                                        <div key={`wrapper-${task.id}`} className="absolute" style={{ left: `${left}%`, width: `${width}%`, top: `6px`, zIndex: 10 }}>
-                                                            <div
-                                                                onClick={() => handleTaskClick(task)}
-                                                                className={`relative h-8 rounded px-2 text-[11px] flex items-center overflow-visible cursor-pointer shadow-sm hover:shadow-md transition-all ${isCompleted ? 'opacity-60' : ''}`}
-                                                                style={{
-                                                                    backgroundColor: `${priorityColor}25`,
-                                                                    borderLeft: `3px solid ${priorityColor}`,
-                                                                    color: '#1F2937'
-                                                                }}
-                                                                title={`${task.title} (${task.status})`}
-                                                            >
-                                                                <span className="truncate font-medium flex items-center gap-1.5 w-full">
-                                                                    {isCompleted && <span className="text-green-600">✓</span>}
-                                                                    {task.title}
-                                                                </span>
-                                                                {/* Visual Connector for Follow-up tasks */}
-                                                                {(task.dependencyIds?.length > 0 || task.subtaskIds?.length > 0) && (
-                                                                    <div className="absolute -right-3 top-1/2 -translate-y-1/2 w-3 h-px bg-gray-400"></div>
-                                                                )}
-                                                                {task.parentTaskId && (
-                                                                    <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-3 h-px bg-gray-400"></div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })()}
-                                            </div>
-                                        </td>
-                                    </tr>
-                                );
-                            })}
-                        </React.Fragment>
-                    ))}
-                </tbody>
-            </table>
-        </TimelineContainer>
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden" style={{ height: 'calc(100vh - 220px)' }}>
+            <TimelineView currentUser={currentUser} />
+        </div>
     );
   };
 
@@ -898,254 +727,239 @@ export default function CalendarView({ currentUser }: Props) {
           </div>
       );
   };
+  const PRIORITIES: Priority[] = ['urgent', 'high', 'normal', 'low'];
+  const STATUSES: string[] = ['new_request', 'in_progress', 'scheduled', 'accepted', 'in_review', 'on_hold', 'completed', 'cancelled'];
+
+  const activeCount = filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length;
+
+
+  const kpis = [
+      { label: 'Completed Tasks', value: filteredTasks.filter(t => t.status === 'completed').length, color: '#111827' },
+      { label: 'In Review', value: filteredTasks.filter(t => t.status === 'in_review').length, color: '#f59e0b' },
+      { label: 'In Progress', value: filteredTasks.filter(t => t.status === 'in_progress').length, color: '#10b981' },
+      { label: 'Scheduled', value: filteredTasks.filter(t => t.status === 'scheduled').length, color: '#3b82f6' },
+      { label: 'On Hold', value: filteredTasks.filter(t => t.status === 'on_hold').length, color: '#ef4444' },
+  ];
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Tasks</h1>
-          <p className="text-sm text-gray-600 mt-1">Manage and track your tasks</p>
+    <div className="min-h-screen font-sans" style={{ backgroundColor: '#f9fafb' }}>
+        {/* Header */}
+        <div className="bg-white border-b border-gray-100">
+            <div className="max-w-screen-xl mx-auto w-full px-8 pt-5 pb-3">
+                
+                {/* Row 1: title + KPIs */}
+                <div className="flex items-start justify-between gap-8 mb-4">
+                    <div className="shrink-0">
+                        <h1 className="text-lg font-semibold text-gray-900 tracking-tight">Tasks</h1>
+                        <p className="text-sm text-gray-400 mt-0.5">Manage and track your tasks</p>
+                    </div>
+                    <div className="flex items-center gap-6">
+                        {kpis.map(({ label, value, color }) => (
+                            <div key={label} className="text-center shrink-0">
+                                <div className="text-xl font-semibold tabular-nums leading-none" style={{ color }}>{value}</div>
+                                <div className="text-[11px] text-gray-400 mt-1 whitespace-nowrap">{label}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Row 2: controls */}
+                <div className="flex items-center gap-3 border-t border-gray-100 pt-3">
+                    {/* Team */}
+                    <select
+                        value={filterTeam}
+                        onChange={e => setFilterTeam(e.target.value)}
+                        className="h-8 pl-3 pr-7 text-xs text-gray-700 bg-white border border-gray-200 rounded-lg appearance-none focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer"
+                        style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' stroke='%239ca3af' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
+                    >
+                        <option value="all">All Teams</option>
+                        {visibleTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+
+                    {pageMode === 'calendar' && (
+                        <>
+                            {/* Timescale */}
+                            <div className="flex items-center h-8 bg-gray-100 rounded-lg p-0.5">
+                                {(['day', 'week', 'month'] as CalendarView[]).map(s => (
+                                    <button key={s} onClick={() => setViewMode(s)}
+                                        className={`px-3 h-full rounded-md text-xs font-medium transition-colors ${viewMode === s ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                                        {s.charAt(0).toUpperCase() + s.slice(1)}
+                                    </button>
+                                ))}
+                            </div>
+                        </>
+                    )}
+
+                    <div className="flex-1" />
+                    <div className="w-px h-6 bg-gray-200" />
+
+                    {/* Filter button */}
+                    <button
+                        onClick={() => setShowFilters(v => !v)}
+                        className={`inline-flex items-center gap-2 h-8 px-3 rounded-lg border text-xs font-medium transition-all ${
+                            showFilters || activeCount > 0
+                                ? 'bg-blue-50 border-blue-200 text-blue-700'
+                                : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300 hover:text-gray-800'
+                        }`}
+                    >
+                        <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                            <path d="M1.5 3.5h10M3.5 6.5h6M5.5 9.5h2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                        </svg>
+                        Filter
+                        {activeCount > 0 && (
+                            <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-blue-600 text-white text-[10px] font-bold leading-none">
+                                {activeCount}
+                            </span>
+                        )}
+                    </button>
+
+                    <div className="w-px h-6 bg-gray-200" />
+
+                    {/* View */}
+                    <div className="flex items-center h-8 bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                        {(['calendar', 'list', 'board', 'timeline'] as TaskPageMode[]).map(key => (
+                            <button key={key} title={key} onClick={() => setPageMode(key)}
+                                className={`w-7 h-full flex items-center justify-center rounded-md transition-all ${pageMode === key ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}>
+                                {ViewIcons[key as keyof typeof ViewIcons]}
+                            </button>
+                        ))}
+                    </div>
+                    <button 
+                        onClick={handleNewTask}
+                        className="h-8 px-3 ml-2 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 flex items-center gap-1.5 transition-colors"
+                    >
+                        <Plus className="w-4 h-4" />
+                        New Task
+                    </button>
+                </div>
+            </div>
         </div>
+
+        {/* Filter panel */}
+        {showFilters && (
+            <div className="bg-white border-b border-gray-100 w-full">
+                <div className="max-w-screen-xl mx-auto w-full px-8 py-4 flex items-start gap-8 flex-wrap">
+                    
+                    {/* Priority */}
+                    <div className="flex flex-col gap-2">
+                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Priority</span>
+                        <div className="flex items-center gap-1 flex-wrap">
+                            {PRIORITIES.map(p => (
+                                <span key={p}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
+                                      filterPriority.includes(p) 
+                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
+                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
+                                    }`}
+                                    onClick={() => {
+                                        if (filterPriority.includes(p)) setFilterPriority(filterPriority.filter(x => x !== p));
+                                        else setFilterPriority([...filterPriority, p]);
+                                    }} 
+                                >
+                                  {p}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="w-px self-stretch bg-gray-100 shrink-0" />
+
+                    {/* Status */}
+                    <div className="flex flex-col gap-2">
+                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Status</span>
+                        <div className="flex items-center gap-1 flex-wrap">
+                            {STATUSES.map(s => (
+                                <span key={s}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
+                                      filterStatus.includes(s) 
+                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
+                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
+                                    }`}
+                                    onClick={() => {
+                                        if (filterStatus.includes(s)) setFilterStatus(filterStatus.filter(x => x !== s));
+                                        else setFilterStatus([...filterStatus, s]);
+                                    }}
+                                >
+                                  {formatStatusLabel(s)}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="w-px self-stretch bg-gray-100 shrink-0" />
+
+                    {/* Brand & Region */}
+                    <div className="flex flex-col gap-2">
+                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Brand</span>
+                        <div className="flex items-center gap-1 flex-wrap max-w-[250px]">
+                            {clients.map(brand => (
+                                <span key={brand.id}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
+                                      filterBrand.includes(brand.id) 
+                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
+                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
+                                    }`}
+                                    onClick={() => {
+                                        if (filterBrand.includes(brand.id)) setFilterBrand(filterBrand.filter(x => x !== brand.id));
+                                        else setFilterBrand([...filterBrand, brand.id]);
+                                    }}
+                                >
+                                  {brand.name}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="w-px self-stretch bg-gray-100 shrink-0" />
+                    
+                    <div className="flex flex-col gap-2">
+                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Region</span>
+                        <div className="flex items-center gap-1 flex-wrap">
+                            {regions.map(region => (
+                                <span key={region.id} 
+                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
+                                      filterRegion.includes(region.id) 
+                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
+                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
+                                    }`}
+                                    onClick={() => {
+                                        if (filterRegion.includes(region.id)) setFilterRegion(filterRegion.filter(x => x !== region.id));
+                                        else setFilterRegion([...filterRegion, region.id]);
+                                    }} 
+                                >
+                                  {region.name}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+
+                    {activeCount > 0 && (
+                        <>
+                            <div className="w-px self-stretch bg-gray-100 shrink-0" />
+                            <div className="flex flex-col gap-2">
+                                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest opacity-0">·</span>
+                                <button onClick={() => {
+                                    setFilterTeam('all');
+                                    setFilterPriority([]);
+                                    setFilterStatus([]);
+                                    setFilterBrand([]);
+                                    setFilterRegion([]);
+                                    setFilterTag([]);
+                                }}
+                                    className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md text-xs font-medium text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-all border border-transparent hover:border-gray-200">
+                                    <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
+                                        <path d="M1 1l7 7M8 1L1 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                                    </svg>
+                                    Clear all
+                                </button>
+                            </div>
+                        </>
+                    )}
+                </div>
+            </div>
+        )}
         
-        <div className="flex items-center gap-3">
-          <div className="flex items-center p-1 bg-gray-100 rounded-xl">
-              <button
-                  onClick={() => setPageMode('list')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'list' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
-                  title="List View"
-              >
-                  <List className="w-5 h-5" strokeWidth={1.5} />
-              </button>
-              <button
-                  onClick={() => setPageMode('board')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'board' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
-                  title="Board View"
-              >
-                  <LayoutGrid className="w-5 h-5" strokeWidth={1.5} />
-              </button>
-              <button
-                  onClick={() => setPageMode('calendar')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'calendar' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
-                  title="Calendar View"
-              >
-                  <Calendar className="w-5 h-5" strokeWidth={1.5} />
-              </button>
-              <button
-                  onClick={() => setPageMode('timeline')}
-                  className={`p-2 rounded-lg transition-all flex items-center justify-center ${pageMode === 'timeline' ? 'bg-white text-blue-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200/50'}`}
-                  title="Timeline View"
-              >
-                  <GanttChart className="w-5 h-5" strokeWidth={1.5} />
-              </button>
-          </div>
-
-          <button 
-            onClick={() => setShowFilters(!showFilters)}
-            className={`px-4 py-2 border rounded-lg text-sm font-medium hover:bg-gray-50 flex items-center gap-2 ${
-              showFilters ? 'border-blue-500 text-blue-700 bg-blue-50' : 'border-gray-300 text-gray-700'
-            }`}
-          >
-            <Filter className="w-4 h-4" />
-            Filters
-            {(filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length > 0) && (
-                <span className="bg-blue-100 text-blue-700 py-0.5 px-2 rounded-full text-xs">
-                    {filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length}
-                </span>
-            )}
-          </button>
-          <button 
-            onClick={handleNewTask}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
-          >
-            <Plus className="w-4 h-4" />
-            New Task
-          </button>
-        </div>
-      </div>
-
-      {/* KPI Stats */}
-      <div className="grid grid-cols-5 gap-4">
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="text-sm text-gray-600">Total Tasks</div>
-          <div className="text-2xl font-semibold text-gray-900 mt-1">{filteredTasks.length}</div>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="text-sm text-gray-600">In Review</div>
-          <div className="text-2xl font-semibold text-yellow-600 mt-1">
-            {filteredTasks.filter(t => t.status === 'manager_review_required').length}
-          </div>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="text-sm text-gray-600">In Progress</div>
-          <div className="text-2xl font-semibold text-blue-600 mt-1">
-            {filteredTasks.filter(t => t.status === 'in_progress').length}
-          </div>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="text-sm text-gray-600">Scheduled</div>
-          <div className="text-2xl font-semibold text-purple-600 mt-1">
-            {filteredTasks.filter(t => t.status === 'scheduled').length}
-          </div>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="text-sm text-gray-600">On Hold</div>
-          <div className="text-2xl font-semibold text-gray-600 mt-1">
-            {filteredTasks.filter(t => t.status === 'on_hold').length}
-          </div>
-        </div>
-      </div>
-
-      {/* Filters Panel */}
-      {showFilters && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="grid grid-cols-6 gap-6">
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-2 block">Team</label>
-              <select
-                value={filterTeam}
-                onChange={(e) => setFilterTeam(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-              >
-                <option value="all">All Teams</option>
-                {visibleTeams.map(team => (
-                  <option key={team.id} value={team.id}>{team.name}</option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-2 block">Priority</label>
-              <div className="space-y-2">
-                {['urgent', 'high', 'normal', 'low'].map(priority => (
-                  <label key={priority} className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={filterPriority.includes(priority)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setFilterPriority([...filterPriority, priority]);
-                        } else {
-                          setFilterPriority(filterPriority.filter(p => p !== priority));
-                        }
-                      }}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-700 capitalize">{priority}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-2 block">Status</label>
-              <div className="space-y-2">
-                {['in_review', 'scheduled', 'in_progress', 'accepted', 'on_hold'].map(status => (
-                  <label key={status} className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={filterStatus.includes(status)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setFilterStatus([...filterStatus, status]);
-                        } else {
-                          setFilterStatus(filterStatus.filter(s => s !== status));
-                        }
-                      }}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-700">{formatStatusLabel(status)}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-2 block">Brand</label>
-              <div className="space-y-2 max-h-32 overflow-y-auto">
-                {clients.map(brand => (
-                  <label key={brand.id} className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={filterBrand.includes(brand.id)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setFilterBrand([...filterBrand, brand.id]);
-                        } else {
-                          setFilterBrand(filterBrand.filter(c => c !== brand.id));
-                        }
-                      }}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-700">{brand.name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-2 block">Region</label>
-              <div className="space-y-2 max-h-32 overflow-y-auto">
-                {regions.map(region => (
-                  <label key={region.id} className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={filterRegion.includes(region.id)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setFilterRegion([...filterRegion, region.id]);
-                        } else {
-                          setFilterRegion(filterRegion.filter(r => r !== region.id));
-                        }
-                      }}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-700">{region.name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-2 block">Tags</label>
-              <div className="space-y-2 max-h-32 overflow-y-auto">
-                {allTags.map(tag => (
-                  <label key={tag.id} className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={filterTag.includes(tag.id)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setFilterTag([...filterTag, tag.id]);
-                        } else {
-                          setFilterTag(filterTag.filter(t => t !== tag.id));
-                        }
-                      }}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-700">{tag.name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-4 pt-4 border-t border-gray-200 flex items-center justify-end">
-            <button 
-              onClick={() => {
-                setFilterTeam('all');
-                setFilterPriority([]);
-                setFilterStatus([]);
-                setFilterBrand([]);
-                setFilterRegion([]);
-                setFilterTag([]);
-              }}
-              className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900"
-            >
-              Clear All
-            </button>
-          </div>
-        </div>
-      )}
+        <div className="max-w-screen-xl mx-auto px-8 py-6 w-full space-y-6">
 
       {/* Navigation and View Controls */}
       {pageMode === 'calendar' && (
@@ -1240,6 +1054,7 @@ export default function CalendarView({ currentUser }: Props) {
         currentUser={currentUser}
         onStatusChange={handleStatusChange}
       />
+      </div>
     </div>
   );
 }

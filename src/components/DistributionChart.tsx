@@ -7,9 +7,10 @@ interface DistributionData {
   flag?: string;
   color?: string;
   NewRequests: number;
-  OnHold: number;
   Planning: number;
   InProgress: number;
+  InReview: number;
+  OnHold: number;
   Completed: number;
   Total: number;
 }
@@ -60,11 +61,7 @@ export default function DistributionChart({ data, title }: Props) {
         <div className="flex flex-wrap items-center justify-end gap-3 mt-0.5 max-w-[60%]">
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-2.5 h-2.5 rounded-sm bg-gray-400" />
-            <span className="text-xs text-gray-500">New</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-amber-500" />
-            <span className="text-xs text-gray-500">On Hold</span>
+            <span className="text-xs text-gray-500">New Request</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-2.5 h-2.5 rounded-sm bg-purple-500" />
@@ -73,6 +70,14 @@ export default function DistributionChart({ data, title }: Props) {
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-2.5 h-2.5 rounded-sm bg-blue-500" />
             <span className="text-xs text-gray-500">In Progress</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-yellow-500" />
+            <span className="text-xs text-gray-500">In Review</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-red-500" />
+            <span className="text-xs text-gray-500">On Hold</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-500" />
@@ -119,7 +124,7 @@ export default function DistributionChart({ data, title }: Props) {
                       className="flex-1 flex items-end justify-center relative z-10 group"
                     >
                       {/* Tooltip trigger area */}
-                      <div className="absolute inset-0 z-20 cursor-pointer" title={`${d.name}\nTotal: ${d.Total}\nNew: ${d.NewRequests}\nOn Hold: ${d.OnHold}\nPlanning: ${d.Planning}\nIn Progress: ${d.InProgress}\nCompleted: ${d.Completed}`} />
+                      <div className="absolute inset-0 z-20 cursor-pointer" title={`${d.name}\nTotal: ${d.Total}\nNew Request: ${d.NewRequests}\nPlanning: ${d.Planning}\nIn Progress: ${d.InProgress}\nIn Review: ${d.InReview}\nOn Hold: ${d.OnHold}\nCompleted: ${d.Completed}`} />
                       
                       <div 
                         className="w-7 flex flex-col-reverse justify-start rounded-t-md overflow-hidden transition-all group-hover:brightness-95" 
@@ -140,8 +145,13 @@ export default function DistributionChart({ data, title }: Props) {
                             <span className="opacity-0 group-hover:opacity-100 text-[10px] font-bold text-white leading-none drop-shadow-sm transition-opacity">{d.Planning}</span>
                           </div>
                         )}
+                        {d.Total > 0 && d.InReview > 0 && (
+                          <div className="w-full bg-yellow-500 flex items-center justify-center overflow-hidden min-h-[14px]" style={{ height: `${(d.InReview / d.Total) * 100}%` }}>
+                            <span className="opacity-0 group-hover:opacity-100 text-[10px] font-bold text-white leading-none drop-shadow-sm transition-opacity">{d.InReview}</span>
+                          </div>
+                        )}
                         {d.Total > 0 && d.OnHold > 0 && (
-                          <div className="w-full bg-amber-500 flex items-center justify-center overflow-hidden min-h-[14px]" style={{ height: `${(d.OnHold / d.Total) * 100}%` }}>
+                          <div className="w-full bg-red-500 flex items-center justify-center overflow-hidden min-h-[14px]" style={{ height: `${(d.OnHold / d.Total) * 100}%` }}>
                             <span className="opacity-0 group-hover:opacity-100 text-[10px] font-bold text-white leading-none drop-shadow-sm transition-opacity">{d.OnHold}</span>
                           </div>
                         )}

@@ -50,6 +50,7 @@ interface Props {
 }
 
 const ALL_STATUSES = [
+    { value: 'new_request', label: 'new request' },
     { value: 'planning', label: 'Planning' },
     { value: 'in_progress', label: 'In Progress' },
     { value: 'in_review', label: 'In Review' },
@@ -113,7 +114,7 @@ function FieldRow({ label, icon, children }: { label: React.ReactNode; icon?: Re
 
 export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, isSubPanel = false, parentTitle = "", depth = 0, onNestedDepthChange, activeDepth, onActiveDepthChange }: Props) {
     const { confirm } = useConfirm();
-    const isTeamLeaderOfTask = currentUser.role === 'team_leader' && teams.some(t => task?.teamIds.includes(t.id) && t.leaderId === currentUser.id);
+    const isTeamLeaderOfTask = currentUser.role === 'team_leader' && teams.some(t => task?.teamIds.includes(t.id) && t.memberIds.includes(currentUser.id));
     const canDeleteTask = currentUser.role === 'super_admin' || currentUser.role === 'admin' || isTeamLeaderOfTask || task?.requesterId === currentUser.id;
 
     const [localStatus, setLocalStatus] = useState(task?.status || '');
@@ -231,9 +232,9 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             const initialCollabs = users.filter(u => {
                 if (u.role === 'super_admin' || u.role === 'admin') return true;
                 if (u.id === task.assignedToId) return true;
-                if (task.teamIds?.some(tid => {
+                if (u.role === 'team_leader' && task.teamIds?.some(tid => {
                     const t = teams.find(team => team.id === tid);
-                    return t?.leaderId === u.id;
+                    return t?.memberIds.includes(u.id);
                 })) {
                     return true;
                 }

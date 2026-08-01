@@ -42,20 +42,26 @@ const AuthenticatedRoutes = () => {
     
     const user = currentUser as User;
     
+    const wrap = (Component: React.ReactNode) => (
+        <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
+            {Component}
+        </div>
+    );
+    
     return (
         <Routes>
             <Route path="/" element={<Navigate to="/workload" replace />} />
-            <Route path="/dashboard" element={<OrganizationDashboard currentUser={user} />} />
+            <Route path="/dashboard" element={wrap(<OrganizationDashboard currentUser={user} />)} />
             <Route path="/workload" element={<WorkloadDashboard currentUser={user} />} />
             <Route path="/tasks" element={<CalendarView currentUser={user} />} />
-            <Route path="/personal" element={<PersonalDashboard currentUser={user} />} />
-            <Route path="/approval" element={<TaskApproval currentUser={user} />} />
-            <Route path="/manager-review" element={<ManagerReview currentUser={user} />} />
-            <Route path="/new-request" element={<RequestForm currentUser={user} />} />
-            <Route path="/integrations" element={<Integrations currentUser={user} />} />
-            <Route path="/reports" element={<Reports currentUser={user} />} />
-            <Route path="/team-management" element={<TeamManagement currentUser={user} />} />
-            <Route path="/form-setup" element={<FormSetup />} />
+            <Route path="/personal" element={wrap(<PersonalDashboard currentUser={user} />)} />
+            <Route path="/approval" element={wrap(<TaskApproval currentUser={user} />)} />
+            <Route path="/manager-review" element={wrap(<ManagerReview currentUser={user} />)} />
+            <Route path="/new-request" element={wrap(<RequestForm currentUser={user} />)} />
+            <Route path="/integrations" element={wrap(<Integrations currentUser={user} />)} />
+            <Route path="/reports" element={wrap(<Reports currentUser={user} />)} />
+            <Route path="/team-management" element={wrap(<TeamManagement currentUser={user} />)} />
+            <Route path="/form-setup" element={wrap(<FormSetup />)} />
             <Route path="*" element={<Navigate to="/workload" replace />} />
         </Routes>
     );

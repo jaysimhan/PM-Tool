@@ -113,9 +113,10 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
     const getTaskCounts = (filteredTasks: Task[]) => {
         return {
             NewRequests: filteredTasks.filter(t => t.status === 'new_request' || t.status === 'awaiting_assignment').length,
-            OnHold: filteredTasks.filter(t => t.status === 'on_hold' || t.status === 'blocked' || t.status === 'waiting_for_information' || t.status === 'waiting_for_approval').length,
             Planning: filteredTasks.filter(t => t.status === 'scheduled' || t.status === 'manager_review_required' || t.status === 'awaiting_employee_approval' || t.status === 'provisional_assignment' || t.status === 'accepted').length,
             InProgress: filteredTasks.filter(t => t.status === 'in_progress' || t.status === 'changes_requested').length,
+            InReview: filteredTasks.filter(t => t.status === 'in_review').length,
+            OnHold: filteredTasks.filter(t => t.status === 'on_hold' || t.status === 'blocked' || t.status === 'waiting_for_information' || t.status === 'waiting_for_approval').length,
             Completed: filteredTasks.filter(t => t.status === 'completed').length, // Excluding cancelled from the graph
             Total: filteredTasks.length
         };
@@ -125,10 +126,11 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
     const statusData = useMemo(() => {
         const counts = getTaskCounts(tasks);
         return [
-            { name: 'New', count: counts.NewRequests, color: '#9CA3AF' }, // bg-gray-400
-            { name: 'On Hold', count: counts.OnHold, color: '#F59E0B' }, // bg-amber-500
+            { name: 'New Request', count: counts.NewRequests, color: '#9CA3AF' }, // bg-gray-400
             { name: 'Planning', count: counts.Planning, color: '#A855F7' }, // bg-purple-500
             { name: 'In Progress', count: counts.InProgress, color: '#3B82F6' }, // bg-blue-500
+            { name: 'In Review', count: counts.InReview, color: '#EAB308' }, // bg-yellow-500
+            { name: 'On Hold', count: counts.OnHold, color: '#EF4444' }, // bg-red-500
             { name: 'Completed', count: counts.Completed, color: '#10B981' } // bg-emerald-500
         ];
     }, [tasks]);
