@@ -8,10 +8,10 @@ import TaskDetailsPanel from './TaskDetailsPanel';
 import TimelineView from './TimelineView';
 import { TimelineContainer } from './TimelineContainer';
 import { getTagStyle } from '../utils/colors';
-import { 
-    Priority, Status, 
-    PRIORITY_CONFIG, STATUS_CONFIG, 
-    PriorityPill, Pill, ViewIcons 
+import {
+    Priority, Status, Brand,
+    PRIORITY_CONFIG, STATUS_CONFIG, BRAND_CONFIG,
+    PriorityPill, Pill, ViewIcons
 } from './WorkloadDashboardHelpers';
 interface Props {
   currentUser: User;
@@ -741,8 +741,10 @@ export default function CalendarView({ currentUser }: Props) {
       { label: 'On Hold', value: filteredTasks.filter(t => t.status === 'on_hold').length, color: '#ef4444' },
   ];
 
+  // min-h-full, not min-h-screen: this renders below the dashboard header, so a full
+  // viewport of height here overflows the pane it sits in by exactly that header.
   return (
-    <div className="min-h-screen font-sans" style={{ backgroundColor: '#f9fafb' }}>
+    <div className="min-h-full font-sans" style={{ backgroundColor: '#f9fafb' }}>
         {/* Header */}
         <div className="bg-white border-b border-gray-100">
             <div className="max-w-screen-xl mx-auto w-full px-8 pt-5 pb-3">
@@ -845,19 +847,13 @@ export default function CalendarView({ currentUser }: Props) {
                         <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Priority</span>
                         <div className="flex items-center gap-1 flex-wrap">
                             {PRIORITIES.map(p => (
-                                <span key={p}
-                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
-                                      filterPriority.includes(p) 
-                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
-                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
-                                    }`}
+                                <PriorityPill key={p} priority={p}
+                                    active={filterPriority.includes(p)}
                                     onClick={() => {
                                         if (filterPriority.includes(p)) setFilterPriority(filterPriority.filter(x => x !== p));
                                         else setFilterPriority([...filterPriority, p]);
-                                    }} 
-                                >
-                                  {p}
-                                </span>
+                                    }}
+                                />
                             ))}
                         </div>
                     </div>
@@ -869,66 +865,59 @@ export default function CalendarView({ currentUser }: Props) {
                         <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Status</span>
                         <div className="flex items-center gap-1 flex-wrap">
                             {STATUSES.map(s => (
-                                <span key={s}
-                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
-                                      filterStatus.includes(s) 
-                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
-                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
-                                    }`}
+                                <Pill key={s} label={formatStatusLabel(s)} color={STATUS_CONFIG[s]?.color || '#94a3b8'} dot
+                                    active={filterStatus.includes(s)}
                                     onClick={() => {
                                         if (filterStatus.includes(s)) setFilterStatus(filterStatus.filter(x => x !== s));
                                         else setFilterStatus([...filterStatus, s]);
                                     }}
-                                >
-                                  {formatStatusLabel(s)}
-                                </span>
+                                />
                             ))}
                         </div>
                     </div>
 
                     <div className="w-px self-stretch bg-gray-100 shrink-0" />
 
-                    {/* Brand & Region */}
+                    {/* Brand */}
                     <div className="flex flex-col gap-2">
                         <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Brand</span>
-                        <div className="flex items-center gap-1 flex-wrap max-w-[250px]">
-                            {clients.map(brand => (
-                                <span key={brand.id}
-                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
-                                      filterBrand.includes(brand.id) 
-                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
-                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
-                                    }`}
-                                    onClick={() => {
-                                        if (filterBrand.includes(brand.id)) setFilterBrand(filterBrand.filter(x => x !== brand.id));
-                                        else setFilterBrand([...filterBrand, brand.id]);
-                                    }}
-                                >
-                                  {brand.name}
-                                </span>
-                            ))}
+                        <div className="flex items-center gap-1 flex-wrap">
+                            {clients.map(brand => {
+                                const domainMap: Record<string, string> = {
+                                    'CareStack': 'carestack.com', 'VoiceStack': 'voicestack.com',
+                                    'OS Dental': 'osdental.com', 'ACE DSN': 'acedsn.com', 'Aeka': 'aeka.com'
+                                };
+                                let domain = '';
+                                try { if (brand.website) domain = new URL(brand.website).hostname; } catch (e) {}
+                                if (!domain) domain = domainMap[brand.name];
+                                const logoUrl = brand.favicon || (domain ? `https://logo.clearbit.com/${domain}` : undefined);
+                                return (
+                                    <Pill key={brand.id} label={brand.name} color={BRAND_CONFIG[brand.name as Brand]?.color || '#3b82f6'}
+                                        logoUrl={logoUrl}
+                                        active={filterBrand.includes(brand.id)}
+                                        onClick={() => {
+                                            if (filterBrand.includes(brand.id)) setFilterBrand(filterBrand.filter(x => x !== brand.id));
+                                            else setFilterBrand([...filterBrand, brand.id]);
+                                        }}
+                                    />
+                                );
+                            })}
                         </div>
                     </div>
 
                     <div className="w-px self-stretch bg-gray-100 shrink-0" />
-                    
+
                     <div className="flex flex-col gap-2">
                         <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Region</span>
                         <div className="flex items-center gap-1 flex-wrap">
                             {regions.map(region => (
-                                <span key={region.id} 
-                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider cursor-pointer border transition-colors ${
-                                      filterRegion.includes(region.id) 
-                                      ? 'border-blue-600 bg-blue-50 text-blue-700' 
-                                      : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
-                                    }`}
+                                <Pill key={region.id} label={region.name} color="#475569" prefix={region.flag ? `${region.flag} ` : ''}
+                                    active={filterRegion.includes(region.id)}
                                     onClick={() => {
                                         if (filterRegion.includes(region.id)) setFilterRegion(filterRegion.filter(x => x !== region.id));
                                         else setFilterRegion([...filterRegion, region.id]);
-                                    }} 
-                                >
-                                  {region.name}
-                                </span>
+                                    }}
+                                />
                             ))}
                         </div>
                     </div>

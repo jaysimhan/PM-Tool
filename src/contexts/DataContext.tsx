@@ -55,7 +55,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 { data: tagsData },
                 { data: regionsData },
                 { data: skillsData },
-                { data: teamSkillsData }
+                { data: teamSkillsData },
+                { data: userSkillsData }
             ] = await Promise.all([
                 supabase.from('users').select('*'),
                 supabase.from('teams').select('*'),
@@ -65,12 +66,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 supabase.from('comments').select('*'),
                 supabase.from('tags').select('*'),
                 supabase.from('regions').select('*'),
-                supabase.from('skills').select('*'),
-                supabase.from('team_skills').select('*')
+                supabase.from('skills').select('id, name, category'),
+                supabase.from('team_skills').select('*'),
+                supabase.from('user_skills').select('*')
             ]);
 
             if (usersData) {
                 const members = teamMembersData || [];
+                const uSkills = userSkillsData || [];
                 const transformedUsers = usersData.map((u: any) => {
                     const userTeams = Array.from(new Set(members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id)));
                     return {
@@ -78,11 +81,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                         name: u.name,
                         email: u.email,
                         role: u.role,
-                        skillIds: u.skills || [],
+                        skillIds: uSkills.filter((us: any) => us.user_id === u.id).map((us: any) => us.skill_id),
                         teamIds: userTeams,
                         dailyCapacity: 8,
                         avatar: u.avatar,
-                        isActive: true
+                        isActive: u.is_active !== false,
+                        onboardingCompleted: u.onboarding_completed === true
                     };
                 }) as unknown as User[];
                 setUsers(transformedUsers);
@@ -124,6 +128,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                     priority: t.priority,
                     assignedToId: t.assignee_id,
                     requesterId: t.requester_id,
+                    requesterName: t.requester_name || undefined,
+                    requesterEmail: t.requester_email || undefined,
                     clientId: t.client_id,
                     regionId: t.region_id,
                     region: t.region || undefined,
@@ -171,13 +177,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const refreshUsers = async () => {
         const [
             { data: usersData },
-            { data: teamMembersData }
+            { data: teamMembersData },
+            { data: userSkillsData }
         ] = await Promise.all([
             supabase.from('users').select('*'),
-            supabase.from('team_members').select('*')
+            supabase.from('team_members').select('*'),
+            supabase.from('user_skills').select('*')
         ]);
         if (usersData) {
             const members = teamMembersData || [];
+            const uSkills = userSkillsData || [];
             const transformedUsers = usersData.map((u: any) => {
                 const userTeams = Array.from(new Set(members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id)));
                 return {
@@ -187,8 +196,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                     role: u.role,
                     avatar: u.avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${u.name}&backgroundColor=3b82f6`,
                     teamIds: userTeams,
-                    skillIds: [], // We'd need user_skills table for this, using empty for now
-                    dailyCapacity: 8
+                    skillIds: uSkills.filter((us: any) => us.user_id === u.id).map((us: any) => us.skill_id),
+                    dailyCapacity: 8,
+                    isActive: u.is_active !== false,
+                    onboardingCompleted: u.onboarding_completed === true
                 };
             }) as unknown as User[];
             setUsers(transformedUsers);
@@ -206,6 +217,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 priority: t.priority,
                 assignedToId: t.assignee_id,
                 requesterId: t.requester_id,
+                requesterName: t.requester_name || undefined,
+                requesterEmail: t.requester_email || undefined,
                 clientId: t.client_id,
                 regionId: t.region_id,
                 region: t.region || undefined,
@@ -257,13 +270,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     };
 
     const refreshSkills = async () => {
-        const { data: skillsData } = await supabase.from('skills').select('*');
+        const [{ data: skillsData }, { data: teamSkillsData }] = await Promise.all([
+            supabase.from('skills').select('id, name, category'),
+            supabase.from('team_skills').select('*')
+        ]);
         if (skillsData) {
             const transformedSkills = skillsData.map((s: any) => ({
                 id: s.id,
                 name: s.name,
                 category: s.category || 'General',
-                teamIds: []
+                teamIds: (teamSkillsData || []).filter((ts: any) => ts.skill_id === s.id).map((ts: any) => ts.team_id)
             }));
             setSkills(transformedSkills);
         }

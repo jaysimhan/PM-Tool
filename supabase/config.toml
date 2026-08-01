@@ -385,6 +385,13 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# The public request form is submitted by people with no account, so the confirmation
+# email has to be triggerable without a JWT. The function authenticates the call itself,
+# against the share token and the submission row -- see its header comment.
+[functions.send-request-confirmation]
+enabled = true
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

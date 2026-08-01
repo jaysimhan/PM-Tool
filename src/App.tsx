@@ -1,7 +1,8 @@
 import React, { Suspense, lazy } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Login } from './components/Login';
-import { CreatePassword } from './components/CreatePassword';
+import { SecuritySettings } from './components/SecuritySettings';
+import { Onboarding } from './components/Onboarding';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { DashboardLayout } from './layouts/DashboardLayout';
 import { useAuth } from './contexts/AuthContext';
@@ -21,6 +22,7 @@ const TeamManagement = lazy(() => import('./components/TeamManagement'));
 const Integrations = lazy(() => import('./components/Integrations'));
 const FormSetup = lazy(() => import('./components/FormSetup').then(m => ({ default: m.FormSetup })));
 const PublicDashboard = lazy(() => import('./components/PublicDashboard'));
+const PublicRequestForm = lazy(() => import('./components/PublicRequestForm'));
 
 const PageLoader = () => (
     <div className="flex items-center justify-center h-screen bg-gray-50">
@@ -76,8 +78,14 @@ export default function App() {
             <Routes>
                 {/* Public / Unauthenticated Routes */}
                 <Route path="/login" element={(!session || mfaRequired) ? <Login /> : <Navigate to="/" />} />
-                <Route path="/update-password" element={session ? <CreatePassword /> : <Navigate to="/login" />} />
+                <Route path="/update-password" element={session ? <SecuritySettings /> : <Navigate to="/login" />} />
+                {/* Invite landing: authenticated but not yet a member of the org. Onboarding
+                    guards on the session itself so a slow session restore doesn't bounce it. */}
+                <Route path="/welcome" element={<Onboarding />} />
                 <Route path="/public/dashboard" element={<PublicDashboard />} />
+                {/* The shareable link from Share Request Form. Public on purpose: the token
+                    in the path is the only credential, and it is checked server-side. */}
+                <Route path="/request/:token" element={<PublicRequestForm />} />
                 
                 {/* Protected Routes */}
                 <Route element={<ProtectedRoute />}>

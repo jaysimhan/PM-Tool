@@ -175,6 +175,7 @@ export const getStatusBadgeColor = (status: string): string => {
 
 export const formatStatusLabel = (status: string): string => {
     switch (status) {
+        case 'new_request': return 'New Request';
         case 'planning': return 'Planning';
         case 'in_progress': return 'In Progress';
         case 'in_review': return 'In Review';

@@ -1,24 +1,109 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { User } from '../types/types';
 import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon, Edit2, Trash2, Shield } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
 import { supabase, supabaseAdmin } from '../lib/supabaseClient';
 import toast from 'react-hot-toast';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { embedText } from '../utils/embeddings';
 interface Props {
     currentUser: User;
 }
 
+const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[a-zA-Z]{2,}$/;
+
+// Spreadsheet and mail-client copies often carry `Name <a@b.com>` or quoted values.
+const extractEmail = (raw: string): string | null => {
+    const angled = raw.match(/<([^>]+)>/);
+    const candidate = (angled ? angled[1] : raw).replace(/^["']+|["']+$/g, '').trim();
+    return EMAIL_RE.test(candidate) ? candidate : null;
+};
+
+// Entries arrive comma/semicolon separated, or newline/tab separated from Excel. A space
+// only splits when every piece it produces is an email, so names like "John Doe" survive.
+const splitEntries = (raw: string): string[] =>
+    raw.split(/[,;\n\r\t]+/)
+        .flatMap(part => {
+            const pieces = part.trim().split(/\s+/);
+            return pieces.length > 1 && pieces.every(p => extractEmail(p)) ? pieces : [part];
+        })
+        .map(p => p.trim())
+        .filter(Boolean);
+
+// Icon-only, with the label in a tooltip: the invite dialog is narrow and the link is the
+// secondary action there, so it should not compete with Send for width.
+const CopyInviteLinkButton = () => {
+    const [hovered, setHovered] = useState(false);
+    const [copied, setCopied] = useState(false);
+
+    const copy = async () => {
+        const link = window.location.origin;
+        try {
+            await navigator.clipboard.writeText(link);
+        } catch {
+            window.prompt('Copy the invite link:', link);
+            return;
+        }
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    };
+
+    return (
+        <div className="relative flex items-center">
+            {(hovered || copied) && (
+                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 bg-gray-800 text-white text-xs font-medium rounded-md whitespace-nowrap pointer-events-none">
+                    {copied ? 'Link copied' : 'Copy link'}
+                </div>
+            )}
+            <button
+                type="button"
+                onClick={copy}
+                onMouseEnter={() => setHovered(true)}
+                onMouseLeave={() => setHovered(false)}
+                aria-label="Copy invite link"
+                className="w-10 h-10 rounded-full flex items-center justify-center text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors"
+            >
+                <LinkIcon className="w-5 h-5" />
+            </button>
+        </div>
+    );
+};
+
+let tempInviteeCount = 0;
+const makeTempInvitee = (email: string) => ({
+    id: `temp-${Date.now()}-${tempInviteeCount++}`,
+    name: email,
+    email,
+    role: 'team_member',
+    avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${email}&backgroundColor=3b82f6`,
+} as unknown as User);
+
 export default function TeamManagement({ currentUser }: Props) {
     const { users, teams, skills, refreshTeams, refreshSkills, refreshUsers } = useData();
     const { confirm } = useConfirm();
-    const [selectedTeam, setSelectedTeam] = useState<string>(teams[0]?.id || '');
+    const location = useLocation();
+    const navigate = useNavigate();
+
+    // The viewer's own team always sorts first; everything else is alphabetical.
+    const sortedTeams = useMemo(() => {
+        const myTeamId = teams.find(t => t.memberIds.includes(currentUser.id))?.id;
+        return [...teams].sort((a, b) => {
+            const aMine = a.id === myTeamId;
+            const bMine = b.id === myTeamId;
+            if (aMine && !bMine) return -1;
+            if (bMine && !aMine) return 1;
+            return a.name.localeCompare(b.name);
+        });
+    }, [teams, currentUser.id]);
+
+    const [selectedTeam, setSelectedTeam] = useState<string>('all');
     const [showInviteMember, setShowInviteMember] = useState(false);
     const [inviteSearch, setInviteSearch] = useState('');
     const [selectedInvitees, setSelectedInvitees] = useState<User[]>([]);
     const [showInviteDropdown, setShowInviteDropdown] = useState(false);
     const [inviteRole, setInviteRole] = useState('Editor');
-    const [inviteMessage, setInviteMessage] = useState('');
+    const [unassignedSearch, setUnassignedSearch] = useState('');
     const [showCreateTeam, setShowCreateTeam] = useState(false);
     const [newTeamName, setNewTeamName] = useState('');
     const [newTeamDesc, setNewTeamDesc] = useState('');
@@ -41,12 +126,35 @@ export default function TeamManagement({ currentUser }: Props) {
     const [editSkillCategory, setEditSkillCategory] = useState('');
     const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
     const [editingMemberRole, setEditingMemberRole] = useState('');
+    // Keyboard highlight within the invite suggestion dropdown (-1 = nothing highlighted).
+    const [inviteHighlight, setInviteHighlight] = useState(-1);
+    // "Add existing people" search inside the Edit Team modal. The results list stays open
+    // while the box has focus so an empty query still browses everyone available.
+    const [addMemberSearch, setAddMemberSearch] = useState('');
+    const [addMemberFocused, setAddMemberFocused] = useState(false);
 
     useEffect(() => {
-        if (!selectedTeam && teams.length > 0) {
-            setSelectedTeam(teams[0].id);
+        if (!selectedTeam && sortedTeams.length > 0) {
+            setSelectedTeam('all');
         }
-    }, [teams, selectedTeam]);
+    }, [sortedTeams, selectedTeam]);
+
+    // Arriving from the sidebar's Invite Team Member button. It cannot say which team it
+    // means, so default to the viewer's own and let them switch inside the dialog. The state
+    // is cleared straight away, otherwise a reload would reopen the dialog.
+    useEffect(() => {
+        if (!(location.state as { openInvite?: boolean } | null)?.openInvite) return;
+        if (sortedTeams.length === 0) return;
+
+        const ownTeam = sortedTeams.find(t => t.memberIds.includes(currentUser.id));
+        setActionTeamId((ownTeam || sortedTeams[0]).id);
+        setSelectedInvitees([]);
+        setInviteSearch('');
+        setInviteHighlight(-1);
+        setShowInviteDropdown(false);
+        setShowInviteMember(true);
+        navigate(location.pathname, { replace: true, state: null });
+    }, [location, sortedTeams, currentUser.id, navigate]);
 
     const team = selectedTeam !== 'all' ? teams.find(t => t.id === selectedTeam) : undefined;
     const actionTeam = teams.find(t => t.id === actionTeamId);
@@ -54,11 +162,59 @@ export default function TeamManagement({ currentUser }: Props) {
         return skills.find(s => s.id === skillId)?.name || skillId;
     };
 
-    // Only the super admin can assign 'admin'; admins/super admin can assign 'team_leader'.
-    // 'super_admin' itself only ever changes via Transfer Ownership.
+    // Everyone can view every team's members/skills. Admins and the super admin can
+    // manage any team; a team leader can only edit/invite for the team they're on.
+    const canManageTeam = (t: typeof teams[0]) =>
+        currentUser.role === 'super_admin' ||
+        currentUser.role === 'admin' ||
+        (currentUser.role === 'team_leader' && t.memberIds.includes(currentUser.id));
+
+    // Nobody hands out 'super_admin' — it only moves via Transfer Ownership — and 'admin' is
+    // the super admin's to give. Everything below that is fair game for both.
+    //
+    // 'requester' is absent on purpose: it is where someone sits before they join a team, not
+    // a role to assign. Joining a team promotes them out of it, so handing it back to a team
+    // member would just recreate the state the promotion exists to clear. It still shows in
+    // the dropdown for anyone who currently holds it — see the option lists below.
+    const rolesBelowAdmin = ['team_member', 'team_leader', 'manager'];
     const assignableRoles = currentUser.role === 'super_admin'
-        ? ['team_member', 'team_leader', 'admin']
-        : ['team_member', 'team_leader'];
+        ? [...rolesBelowAdmin, 'admin']
+        : rolesBelowAdmin;
+
+    const canEditRoles = currentUser.role === 'super_admin' || currentUser.role === 'admin';
+
+    const matchesQuery = (u: User, query: string) => {
+        const q = query.trim().toLowerCase();
+        return !q || u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q);
+    };
+
+    // Existing people the invite box can offer: not already capsulized, not already on the
+    // target team. They still show while empty-typed so the list doubles as a people browser.
+    const inviteSuggestions = useMemo(() => {
+        if (!showInviteMember) return [];
+        return users
+            .filter(u => !selectedInvitees.some(s => s.id === u.id))
+            .filter(u => !actionTeam?.memberIds.includes(u.id))
+            .filter(u => matchesQuery(u, inviteSearch))
+            .slice(0, 6);
+    }, [users, selectedInvitees, actionTeam, inviteSearch, showInviteMember]);
+
+    const addInvitee = (user: User) => {
+        setSelectedInvitees(prev => prev.some(u => u.id === user.id) ? prev : [...prev, user]);
+        setInviteSearch('');
+        setInviteHighlight(-1);
+        setShowInviteDropdown(false);
+    };
+
+    // People the Edit Team modal can pull in directly: everyone not already on this team.
+    // Someone already on another team is still listed but flagged, since membership is exclusive.
+    const addMemberCandidates = useMemo(() => {
+        if (!actionTeam) return [];
+        return users
+            .filter(u => !actionTeam.memberIds.includes(u.id))
+            .filter(u => matchesQuery(u, addMemberSearch))
+            .slice(0, 8);
+    }, [users, actionTeam, addMemberSearch]);
 
     const handleRemoveMember = async (teamId: string, userId: string) => {
         const member = users.find(u => u.id === userId);
@@ -84,21 +240,101 @@ export default function TeamManagement({ currentUser }: Props) {
         });
     };
 
-    const handleSaveMemberRole = async (userId: string) => {
-        if (!editingMemberRole) return;
-        if (!assignableRoles.includes(editingMemberRole)) {
-            toast.error('You are not allowed to assign that role.');
+    // People who belong to no team: invitees who never finished setup, and anyone an admin
+    // has taken off a team. They are invisible in the per-team lists, so they get their own.
+    const canSeeUnassigned = currentUser.role === 'super_admin' || currentUser.role === 'admin';
+    const unassignedUsers = useMemo(() => {
+        if (!canSeeUnassigned) return [];
+        return users
+            .filter(u => u.teamIds.length === 0 && u.role !== 'super_admin')
+            .filter(u => matchesQuery(u, unassignedSearch))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }, [users, canSeeUnassigned, unassignedSearch]);
+
+    const setUserActive = async (user: User, isActive: boolean) => {
+        const { error } = await supabase.from('users').update({ is_active: isActive }).eq('id', user.id);
+        if (error) {
+            console.error('Error changing user active state:', error);
+            toast.error(`Could not ${isActive ? 'reactivate' : 'deactivate'} ${user.name}.`);
             return;
         }
-        const { error } = await supabase.from('users').update({ role: editingMemberRole }).eq('id', userId);
+        if (refreshUsers) await refreshUsers();
+        toast.success(`${user.name} ${isActive ? 'reactivated' : 'deactivated'}.`);
+    };
+
+    const handleDeactivateUser = (user: User) => {
+        if (user.role === 'super_admin') {
+            toast.error('The super admin cannot be deactivated. Transfer ownership first.');
+            return;
+        }
+        if (user.id === currentUser.id) {
+            toast.error('You cannot deactivate your own account.');
+            return;
+        }
+        confirm(
+            `Deactivate ${user.name}? They will lose access and drop out of workload planning. Their tasks and history stay put, and you can reactivate them here at any time.`,
+            () => setUserActive(user, false)
+        );
+    };
+
+    const updateMemberRole = async (userId: string, role: string) => {
+        if (!role) return false;
+        const member = users.find(u => u.id === userId);
+        if (member?.role === 'super_admin') {
+            toast.error("The super admin's role can only change through Transfer Ownership.");
+            return false;
+        }
+        // Re-saving the role someone already has is a no-op, not an attempt to assign it.
+        // Matters for roles the viewer cannot hand out but can still see in the dropdown.
+        if (member && role === member.role) return true;
+        if (!assignableRoles.includes(role)) {
+            toast.error('You are not allowed to assign that role.');
+            return false;
+        }
+        const { error } = await supabase.from('users').update({ role }).eq('id', userId);
         if (error) {
             console.error('Error updating user role:', error);
             toast.error('Error updating user role.');
-        } else {
-            if (refreshUsers) await refreshUsers();
-            setEditingMemberId(null);
-            toast.success('Role updated.');
+            return false;
         }
+        if (refreshUsers) await refreshUsers();
+        toast.success('Role updated.');
+        return true;
+    };
+
+    const handleSaveMemberRole = async (userId: string) => {
+        if (await updateMemberRole(userId, editingMemberRole)) {
+            setEditingMemberId(null);
+        }
+    };
+
+    // Adds someone who already has an account straight onto the team - no invite email,
+    // no onboarding. Membership is exclusive, so anyone on another team is rejected here.
+    const handleAddExistingMember = async (userId: string) => {
+        if (!actionTeam) return;
+        const user = users.find(u => u.id === userId);
+        if (!user) return;
+
+        const conflictingTeamId = user.teamIds.find(tid => tid !== actionTeam.id);
+        if (conflictingTeamId) {
+            const conflictingTeamName = teams.find(t => t.id === conflictingTeamId)?.name || 'another team';
+            toast.error(`${user.name} is already on ${conflictingTeamName} and cannot be added to multiple teams.`);
+            return;
+        }
+
+        const { error } = await supabase
+            .from('team_members')
+            .insert({ team_id: actionTeam.id, user_id: userId });
+
+        if (error) {
+            console.error('Error adding member:', error);
+            toast.error(`Could not add ${user.name} to ${actionTeam.name}.`);
+            return;
+        }
+        await refreshTeams();
+        if (refreshUsers) await refreshUsers();
+        setAddMemberSearch('');
+        toast.success(`${user.name} added to ${actionTeam.name}.`);
     };
 
     const handleTransferOwnership = async () => {
@@ -140,117 +376,170 @@ export default function TeamManagement({ currentUser }: Props) {
         });
     };
 
+    // Resolves raw text into capsules: known users match by name or email, anything else
+    // that parses as an email becomes a pending invite. Whatever cannot be resolved comes
+    // back as `leftover` so it can stay in the input for the user to finish typing.
+    const capsulizeEntries = (raw: string, current: User[]) => {
+        const invitees = [...current];
+        const leftover: string[] = [];
+        splitEntries(raw).forEach(entry => {
+            const matchedUser = users.find(u => u.email.toLowerCase() === entry.toLowerCase() || u.name.toLowerCase() === entry.toLowerCase());
+            const email = extractEmail(entry);
+            if (matchedUser) {
+                if (!invitees.some(u => u.id === matchedUser.id)) invitees.push(matchedUser);
+            } else if (email) {
+                if (!invitees.some(u => u.email.toLowerCase() === email.toLowerCase())) invitees.push(makeTempInvitee(email));
+            } else {
+                leftover.push(entry);
+            }
+        });
+        return { invitees, leftover: leftover.join(', ') };
+    };
+
+    // Pull anything still sitting in the input into capsules (on paste, blur, Enter, send).
+    const flushInviteInput = (raw: string, notifyInvalid = false) => {
+        const { invitees, leftover } = capsulizeEntries(raw, selectedInvitees);
+        setSelectedInvitees(invitees);
+        setInviteSearch(leftover);
+        if (leftover && notifyInvalid) toast.error(`"${leftover}" is not a valid email address.`);
+        return { invitees, leftover };
+    };
+
     const handleSendInvites = async () => {
         if (!actionTeam) return;
         let successfulInvites = 0;
 
-        let inviteesToProcess = [...selectedInvitees];
-        
         // Auto-add whatever is currently typed in the input field when hitting send
-        if (inviteSearch.trim()) {
-            const parts = inviteSearch.split(',');
-            parts.forEach((part, index) => {
-                const searchStr = part.trim();
-                if (searchStr) {
-                    const matchedUser = users.find(u => u.email.toLowerCase() === searchStr.toLowerCase() || u.name.toLowerCase() === searchStr.toLowerCase());
-                    if (matchedUser && !inviteesToProcess.find(u => u.id === matchedUser.id)) {
-                        inviteesToProcess.push(matchedUser);
-                    } else if (!matchedUser && !inviteesToProcess.find(u => u.email === searchStr)) {
-                        inviteesToProcess.push({ 
-                            id: `temp-${Date.now()}-auto-${index}`, 
-                            name: searchStr, 
-                            email: searchStr, 
-                            role: 'team_member', 
-                            avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${searchStr}&backgroundColor=3b82f6` 
-                        } as any);
-                    }
-                }
-            });
-        }
+        const { invitees: inviteesToProcess, leftover } = inviteSearch.trim()
+            ? flushInviteInput(inviteSearch, true)
+            : { invitees: selectedInvitees, leftover: '' };
+
+        if (leftover) return;
+        if (inviteesToProcess.length === 0) return;
 
         const generatedLinks: { email: string, link: string }[] = [];
+        const invitedEmails: string[] = [];
 
         for (const user of inviteesToProcess) {
-            let userId = user.id;
+            // A temp id means nobody by that address exists yet, so they need an auth invite.
+            // Someone invited earlier who never finished setup also does: a database trigger
+            // gives them a profile row the moment the first invite goes out, so they look
+            // like an existing member here without ever having set a password.
+            const existingUser = users.find(u => u.id === user.id);
+            const isNewInvite = user.id.startsWith('temp-');
+            const needsResend = !isNewInvite && existingUser?.onboardingCompleted === false;
 
-            // Existing users can only belong to one team at a time
-            if (!userId.startsWith('temp-')) {
-                const existingUser = users.find(u => u.id === userId);
-                const conflictingTeamId = existingUser?.teamIds.find(tid => tid !== actionTeam.id);
-                if (conflictingTeamId) {
-                    const conflictingTeamName = teams.find(t => t.id === conflictingTeamId)?.name || 'another team';
-                    toast.error(`${existingUser!.name} is already on ${conflictingTeamName} and cannot be added to multiple teams.`);
+            if (needsResend) {
+                // Their auth identity already exists, so an invite would be rejected as a
+                // duplicate -- a magic link gets them back to the same setup screen.
+                const redirectTo = `${window.location.origin}/welcome`;
+                const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+                    type: 'magiclink',
+                    email: user.email,
+                    options: { redirectTo }
+                });
+
+                if (linkError || !linkData?.user) {
+                    toast.error(`Could not re-send setup link to ${user.email}: ${linkError?.message || 'Unknown error'}`);
                     continue;
                 }
+                if (linkData.properties?.action_link) {
+                    generatedLinks.push({ email: user.email, link: linkData.properties.action_link });
+                }
+
+                successfulInvites++;
+                invitedEmails.push(user.email);
+                continue;
             }
 
-            // If the user ID starts with temp-, they are a new user that needs to be invited via Supabase Auth
-            if (userId.startsWith('temp-')) {
-                // Since SMTP is not configured, generate the invite link instead of sending an email
-                const { data, error: inviteError } = await supabaseAdmin.auth.admin.generateLink({
-                    type: 'invite',
-                    email: user.email,
-                    options: {
-                        data: {
-                            name: user.name,
-                        }
-                    }
+            if (isNewInvite) {
+                // Lands them on account setup: password, then team and skills.
+                const redirectTo = `${window.location.origin}/welcome`;
+                // The team rides along in user_metadata rather than going into team_members
+                // now: that table's user_id references public.users, and an invitee has no
+                // row there until onboarding creates one. Onboarding applies it from here.
+                const inviteData = { name: user.name, team_id: actionTeam.id };
+
+                const { data, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(user.email, {
+                    redirectTo,
+                    data: inviteData
                 });
-                
-                if (inviteError) {
-                    console.error('Error generating invite link via Supabase:', inviteError);
-                    const errorMsg = inviteError.message && Object.keys(inviteError.message).length > 0
-                        ? inviteError.message
-                        : `Status ${inviteError.status || 'Unknown'} - Please check your Supabase settings.`;
-                    toast.error(`Failed to generate invite link for ${user.email}: ${errorMsg}`);
-                    continue; // Skip adding to team if invite failed
-                }
-                
-                if (data && data.user) {
-                    userId = data.user.id; // Get the real Supabase Auth user ID
-                    if (data.properties?.action_link) {
-                        generatedLinks.push({ email: user.email, link: data.properties.action_link });
+
+                if (!data?.user) {
+                    // Supabase can only send once custom SMTP is configured. Until then, mint
+                    // the same invite link so the admin can pass it on by hand.
+                    console.error('Error sending invite email via Supabase:', inviteError);
+                    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+                        type: 'invite',
+                        email: user.email,
+                        options: { redirectTo, data: inviteData }
+                    });
+
+                    if (linkError || !linkData?.user) {
+                        const errorMsg = inviteError?.message || linkError?.message
+                            || `Status ${inviteError?.status || 'Unknown'} - Please check your Supabase settings.`;
+                        toast.error(`Failed to invite ${user.email}: ${errorMsg}`);
+                        continue;
+                    }
+
+                    if (linkData.properties?.action_link) {
+                        generatedLinks.push({ email: user.email, link: linkData.properties.action_link });
                     }
                 }
+
+                successfulInvites++;
+                invitedEmails.push(user.email);
+                continue;
+            }
+
+            // Existing users are fully set up already, so they join the team right away.
+            if (actionTeam.memberIds.includes(user.id)) {
+                toast.error(`${existingUser?.name || user.email} is already on ${actionTeam.name}.`);
+                continue;
+            }
+
+            // Existing users can only belong to one team at a time
+            const conflictingTeamId = existingUser?.teamIds.find(tid => tid !== actionTeam.id);
+            if (conflictingTeamId) {
+                const conflictingTeamName = teams.find(t => t.id === conflictingTeamId)?.name || 'another team';
+                toast.error(`${existingUser!.name} is already on ${conflictingTeamName} and cannot be added to multiple teams.`);
+                continue;
             }
 
             const { error } = await supabase
                 .from('team_members')
-                .insert({ team_id: actionTeam.id, user_id: userId });
-            
+                .insert({ team_id: actionTeam.id, user_id: user.id });
+
             if (error) {
                 console.error('Error adding member:', error);
+                toast.error(`Could not add ${user.email} to ${actionTeam.name}.`);
             } else {
                 successfulInvites++;
+                invitedEmails.push(user.email);
             }
         }
-        
+
         if (successfulInvites > 0) {
-            let alertMsg = `Successfully added ${successfulInvites} user(s).`;
-            if (inviteMessage.trim()) {
-                alertMsg += `\n\nMessage included:\n${inviteMessage}`;
-            }
+            const who = successfulInvites === 1 ? invitedEmails[0] : `${successfulInvites} people`;
+            let alertMsg = `Invite sent to ${who} for ${actionTeam.name}.`;
             if (generatedLinks.length > 0) {
-                alertMsg += `\n\nSince SMTP is disabled, please send these invite links manually to the users:\n\n`;
-                generatedLinks.forEach(gl => {
-                    alertMsg += `${gl.email}: ${gl.link}\n`;
-                });
+                // The email could not go out, so hand those links over via the clipboard instead
+                const linkText = generatedLinks.map(gl => `${gl.email}: ${gl.link}`).join('\n');
+                const plural = generatedLinks.length === 1 ? 'link' : 'links';
+                try {
+                    await navigator.clipboard.writeText(linkText);
+                    alertMsg += `\n\nEmail could not be delivered - the invite ${plural} copied to your clipboard. Share it with them to finish signup.`;
+                } catch {
+                    alertMsg += `\n\nEmail could not be delivered - share the invite ${plural} manually:\n\n${linkText}`;
+                }
             }
-            toast.success(alertMsg, { duration: 5000 });
+            toast.success(alertMsg, { duration: 6000 });
         }
-        
+
         await refreshTeams();
         setShowInviteMember(false);
         setSelectedInvitees([]);
         setInviteSearch('');
-        setInviteMessage('');
-    };
-
-    const handleCopyLink = () => {
-        if (!actionTeam) return;
-        const link = `${window.location.origin}/team/invite/${actionTeam.id}`;
-        navigator.clipboard.writeText(link);
-        toast.success('Invite link copied to clipboard');
     };
 
     const handleCreateTeam = async () => {
@@ -282,6 +571,8 @@ export default function TeamManagement({ currentUser }: Props) {
         setEditTeamName(t.name);
         setEditTeamDesc(t.description);
         setEditTeamColor(t.color);
+        setAddMemberSearch('');
+        setAddMemberFocused(false);
         setShowEditTeam(true);
     };
 
@@ -320,11 +611,14 @@ export default function TeamManagement({ currentUser }: Props) {
 
     const handleCreateNewSkill = async () => {
         if (!newSkillName.trim() || !actionTeam) return;
+        const name = newSkillName.trim();
+        const embedding = await embedText(`${name} (${newSkillCategory})`).catch(() => null);
         const { data, error } = await supabase.from('skills').insert({
-            name: newSkillName.trim(),
-            category: newSkillCategory
+            name,
+            category: newSkillCategory,
+            ...(embedding ? { embedding } : {})
         }).select();
-        
+
         if (error) {
             console.error('Error creating skill:', error);
             toast.error('Error creating skill.');
@@ -355,9 +649,12 @@ export default function TeamManagement({ currentUser }: Props) {
 
     const handleSaveEditSkill = async (skillId: string) => {
         if (!editSkillName.trim()) return;
+        const name = editSkillName.trim();
+        const embedding = await embedText(`${name} (${editSkillCategory})`).catch(() => null);
         const { error } = await supabase.from('skills').update({
-            name: editSkillName.trim(),
-            category: editSkillCategory
+            name,
+            category: editSkillCategory,
+            ...(embedding ? { embedding } : {})
         }).eq('id', skillId);
         if (error) {
             console.error('Error updating skill:', error);
@@ -377,9 +674,9 @@ export default function TeamManagement({ currentUser }: Props) {
         const teamAdmins = teamMembers.filter(m => m.role === 'admin' || m.role === 'super_admin');
 
         return (
-            <>
+            <div className="bg-white rounded-lg border border-gray-200">
                 {/* Team Overview */}
-                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                <div className="p-6">
                     <div className="flex items-start justify-between mb-6">
                         <div>
                             <div className="flex items-center gap-3 mb-2">
@@ -397,7 +694,7 @@ export default function TeamManagement({ currentUser }: Props) {
                         </div>
 
                         <div className="flex items-center gap-2">
-                            {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                            {canManageTeam(t) && (
                                 <button
                                     onClick={() => { setActionTeamId(t.id); handleOpenEditTeam(t); }}
                                     className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
@@ -474,12 +771,19 @@ export default function TeamManagement({ currentUser }: Props) {
                 </div>
 
                 {/* Team Members */}
-                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                <div className="border-t border-gray-200 p-6">
                     <div className="flex items-center justify-between mb-4">
                         <h2 className="text-lg font-semibold text-gray-900">Team Members</h2>
-                        {(currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'team_leader') && (
+                        {canManageTeam(t) && (
                             <button
-                                onClick={() => { setActionTeamId(t.id); setShowInviteMember(true); }}
+                                onClick={() => {
+                                    setActionTeamId(t.id);
+                                    setSelectedInvitees([]);
+                                    setInviteSearch('');
+                                    setInviteHighlight(-1);
+                                    setShowInviteDropdown(false);
+                                    setShowInviteMember(true);
+                                }}
                                 className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2"
                             >
                                 <UserPlus className="w-4 h-4" />
@@ -519,23 +823,24 @@ export default function TeamManagement({ currentUser }: Props) {
                                                     <span className="text-xs font-medium text-gray-900">{member.dailyCapacity}h</span>
                                                 </div>
 
-                                                <div className="flex items-start gap-2">
-                                                    <Award className="w-4 h-4 text-gray-400 mt-0.5" />
-                                                    <div className="flex-1">
-                                                        <div className="text-xs text-gray-600 mb-1">Skills:</div>
-                                                        <div className="flex flex-wrap gap-1">
-                                                            {memberSkills.slice(0, 4).map((skill, index) => (
-                                                                <span key={index} className="px-2 py-0.5 bg-purple-50 text-purple-700 text-xs rounded">
-                                                                    {skill}
-                                                                </span>
-                                                            ))}
-                                                            {memberSkills.length > 4 && (
-                                                                <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
-                                                                    +{memberSkills.length - 4} more
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    </div>
+                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                    <Award className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                                                    <span className="text-xs text-gray-600 -ml-1">Skills:</span>
+                                                    {memberSkills.slice(0, 4).map((skill, index) => (
+                                                        <span key={index} className="px-2 py-0.5 bg-purple-50 text-purple-700 text-xs rounded">
+                                                            {skill}
+                                                        </span>
+                                                    ))}
+                                                    {memberSkills.length > 4 && (
+                                                        <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
+                                                            +{memberSkills.length - 4} more
+                                                        </span>
+                                                    )}
+                                                    {memberSkills.length === 0 && (
+                                                        <span className="text-xs text-gray-400 italic">
+                                                            {member.id === currentUser.id ? 'None yet - add them in Preferences' : 'None yet'}
+                                                        </span>
+                                                    )}
                                                 </div>
                                             </div>
                                         </div>
@@ -549,7 +854,8 @@ export default function TeamManagement({ currentUser }: Props) {
                                                         className="pl-2 pr-6 py-1 bg-white border border-gray-300 rounded text-xs appearance-none focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer"
                                                         style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' stroke='%239ca3af' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center' }}
                                                     >
-                                                        {assignableRoles.map(role => (
+                                                        {/* A role the viewer cannot assign still shows, so the select never lies about the current value */}
+                                                        {(assignableRoles.includes(member.role) ? assignableRoles : [member.role, ...assignableRoles]).map(role => (
                                                             <option key={role} value={role}>
                                                                 {role.replace('_', ' ').replace(/^./, c => c.toUpperCase())}
                                                             </option>
@@ -600,7 +906,7 @@ export default function TeamManagement({ currentUser }: Props) {
                 </div>
 
                 {/* Team Skills */}
-                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                <div className="border-t border-gray-200 p-6">
                     <div className="flex items-center justify-between mb-4">
                         <h2 className="text-lg font-semibold text-gray-900">Team Skills</h2>
                         {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
@@ -631,7 +937,7 @@ export default function TeamManagement({ currentUser }: Props) {
                         })}
                     </div>
                 </div>
-            </>
+            </div>
         );
     };
 
@@ -655,7 +961,7 @@ export default function TeamManagement({ currentUser }: Props) {
                             style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' stroke='%239ca3af' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center' }}
                         >
                             <option value="all">All Teams</option>
-                            {teams.map(t => (
+                            {sortedTeams.map(t => (
                                 <option key={t.id} value={t.id}>{t.name}</option>
                             ))}
                         </select>
@@ -684,8 +990,90 @@ export default function TeamManagement({ currentUser }: Props) {
             </div>
 
             {selectedTeam === 'all'
-                ? teams.map(t => <React.Fragment key={t.id}>{renderTeamSection(t)}</React.Fragment>)
+                ? sortedTeams.map(t => <React.Fragment key={t.id}>{renderTeamSection(t)}</React.Fragment>)
                 : team && renderTeamSection(team)}
+
+            {/* Members without a team -- invisible everywhere else, since every other list
+                is scoped to a team. Admins only. */}
+            {canSeeUnassigned && (
+                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                    <div className="flex items-center justify-between gap-4 mb-1">
+                        <h2 className="text-lg font-semibold text-gray-900">
+                            Members without a team
+                            <span className="ml-2 text-sm font-normal text-gray-500">({unassignedUsers.length})</span>
+                        </h2>
+                        {unassignedUsers.length > 0 && (
+                            <input
+                                type="text"
+                                value={unassignedSearch}
+                                onChange={(e) => setUnassignedSearch(e.target.value)}
+                                placeholder="Search name or email..."
+                                className="w-56 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none"
+                            />
+                        )}
+                    </div>
+                    <p className="text-sm text-gray-600 mb-4">
+                        Nobody here can use the app until they are on a team &mdash; they are asked to pick one
+                        the next time they log in. Add them to a team from Edit Team, or deactivate them.
+                    </p>
+
+                    {unassignedUsers.length === 0 ? (
+                        <div className="text-sm text-gray-500 py-6 text-center border border-dashed border-gray-200 rounded-lg">
+                            {unassignedSearch.trim() ? 'Nobody matches that search.' : 'Everyone belongs to a team.'}
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            {unassignedUsers.map(u => (
+                                <div key={u.id} className="border border-gray-200 rounded-lg p-4 flex items-center justify-between gap-4">
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-medium shrink-0 ${u.isActive ? 'bg-gray-400' : 'bg-gray-300'}`}>
+                                            {u.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
+                                        </div>
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <h3 className={`text-sm font-medium truncate ${u.isActive ? 'text-gray-900' : 'text-gray-500'}`}>
+                                                    {u.name}
+                                                </h3>
+                                                <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded capitalize">
+                                                    {u.role.replace('_', ' ')}
+                                                </span>
+                                                {!u.onboardingCompleted && (
+                                                    <span className="px-2 py-0.5 bg-amber-50 text-amber-700 text-xs rounded">
+                                                        Invite pending
+                                                    </span>
+                                                )}
+                                                {!u.isActive && (
+                                                    <span className="px-2 py-0.5 bg-red-50 text-red-700 text-xs rounded">
+                                                        Deactivated
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-xs text-gray-500 truncate">{u.email}</div>
+                                        </div>
+                                    </div>
+
+                                    {u.isActive ? (
+                                        <button
+                                            onClick={() => handleDeactivateUser(u)}
+                                            className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-red-50 hover:text-red-700 hover:border-red-200 flex items-center gap-2 shrink-0"
+                                        >
+                                            <Trash2 className="w-4 h-4" />
+                                            Deactivate
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={() => setUserActive(u, true)}
+                                            className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 shrink-0"
+                                        >
+                                            Reactivate
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Invite Member Modal */}
             {showInviteMember && (
@@ -720,104 +1108,122 @@ export default function TeamManagement({ currentUser }: Props) {
                                     ))}
                                     <input
                                         type="text"
-                                        placeholder={selectedInvitees.length === 0 ? "Add people" : ""}
+                                        autoFocus
+                                        placeholder={selectedInvitees.length === 0 ? "Search people or type an email" : ""}
                                         value={inviteSearch}
+                                        onFocus={() => setShowInviteDropdown(true)}
                                         onChange={(e) => {
                                             const val = e.target.value;
-                                            if (val.includes(',')) {
-                                                const parts = val.split(',');
-                                                let newInvitees = [...selectedInvitees];
-                                                parts.forEach((part, index) => {
-                                                    const searchStr = part.trim();
-                                                    if (searchStr) {
-                                                        const matchedUser = users.find(u => u.email.toLowerCase() === searchStr.toLowerCase() || u.name.toLowerCase() === searchStr.toLowerCase());
-                                                        if (matchedUser && !newInvitees.find(u => u.id === matchedUser.id)) {
-                                                            newInvitees.push(matchedUser);
-                                                        } else if (!matchedUser && !newInvitees.find(u => u.email === searchStr)) {
-                                                            newInvitees.push({ 
-                                                                id: `temp-${Date.now()}-${index}`, 
-                                                                name: searchStr, 
-                                                                email: searchStr, 
-                                                                role: 'team_member', 
-                                                                avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${searchStr}&backgroundColor=3b82f6` 
-                                                            } as any);
-                                                        }
-                                                    }
-                                                });
-                                                setSelectedInvitees(newInvitees);
-                                                setInviteSearch('');
+                                            setShowInviteDropdown(true);
+                                            setInviteHighlight(-1);
+                                            // A separator means the entry before it is finished - capsulize it now
+                                            if (/[,;\n\r\t]/.test(val)) {
+                                                flushInviteInput(val);
                                             } else {
                                                 setInviteSearch(val);
                                             }
                                         }}
+                                        onPaste={(e) => {
+                                            const pasted = e.clipboardData.getData('text');
+                                            if (!pasted) return;
+                                            e.preventDefault();
+                                            // Emails pasted from Excel or a mail client capsulize without pressing Enter
+                                            flushInviteInput(inviteSearch + pasted);
+                                        }}
+                                        onBlur={() => {
+                                            if (inviteSearch.trim()) flushInviteInput(inviteSearch);
+                                        }}
                                         onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && inviteSearch.trim()) {
+                                            const suggestion = inviteSuggestions[inviteHighlight];
+                                            if (e.key === 'ArrowDown' && inviteSuggestions.length > 0) {
                                                 e.preventDefault();
-                                                const searchStr = inviteSearch.trim();
-                                                // Find if it matches an existing user, else create a dummy one for the invite
-                                                const matchedUser = users.find(u => u.email.toLowerCase() === searchStr.toLowerCase() || u.name.toLowerCase() === searchStr.toLowerCase());
-                                                
-                                                if (matchedUser && !selectedInvitees.find(u => u.id === matchedUser.id)) {
-                                                    setSelectedInvitees([...selectedInvitees, matchedUser]);
-                                                } else if (!matchedUser) {
-                                                    // Allow inviting external emails
-                                                    setSelectedInvitees([...selectedInvitees, { 
-                                                        id: `temp-${Date.now()}`, 
-                                                        name: searchStr, 
-                                                        email: searchStr, 
-                                                        role: 'team_member', 
-                                                        avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${searchStr}&backgroundColor=3b82f6` 
-                                                    } as any]);
-                                                }
-                                                setInviteSearch('');
+                                                setShowInviteDropdown(true);
+                                                setInviteHighlight((inviteHighlight + 1) % inviteSuggestions.length);
+                                            } else if (e.key === 'ArrowUp' && inviteSuggestions.length > 0) {
+                                                e.preventDefault();
+                                                setShowInviteDropdown(true);
+                                                setInviteHighlight((inviteHighlight - 1 + inviteSuggestions.length) % inviteSuggestions.length);
+                                            } else if (e.key === 'Escape') {
+                                                setShowInviteDropdown(false);
+                                                setInviteHighlight(-1);
+                                            } else if (e.key === 'Enter' && showInviteDropdown && suggestion) {
+                                                // A highlighted person wins over parsing the raw text
+                                                e.preventDefault();
+                                                addInvitee(suggestion);
+                                            } else if (e.key === 'Enter' && inviteSearch.trim()) {
+                                                e.preventDefault();
+                                                flushInviteInput(inviteSearch, true);
+                                            } else if (e.key === 'Backspace' && !inviteSearch && selectedInvitees.length > 0) {
+                                                setSelectedInvitees(selectedInvitees.slice(0, -1));
                                             }
                                         }}
                                         className="flex-1 min-w-[150px] outline-none text-sm px-1.5 py-1 text-gray-800 placeholder-gray-500"
                                     />
                                 </div>
                             </div>
+
+                            {/* Existing-people suggestions */}
+                            {showInviteDropdown && inviteSuggestions.length > 0 && (
+                                <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 z-10 max-h-64 overflow-y-auto">
+                                    {inviteSuggestions.map((user, index) => {
+                                        const otherTeam = teams.find(t => t.id !== actionTeamId && user.teamIds.includes(t.id));
+                                        return (
+                                            <button
+                                                key={user.id}
+                                                type="button"
+                                                // Keeps the input's blur handler from firing before the click lands
+                                                onMouseDown={(e) => e.preventDefault()}
+                                                onMouseEnter={() => setInviteHighlight(index)}
+                                                onClick={() => addInvitee(user)}
+                                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-left ${index === inviteHighlight ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                                            >
+                                                <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-xs font-medium text-blue-700 shrink-0">
+                                                    {user.name.split(' ').map(n => n[0]).join('')}
+                                                </div>
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="text-sm text-gray-900 truncate">{user.name}</div>
+                                                    <div className="text-xs text-gray-500 truncate">{user.email}</div>
+                                                </div>
+                                                {otherTeam && (
+                                                    <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">
+                                                        On {otherTeam.name}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
 
                         {selectedInvitees.length > 0 ? (
-                            <div className="flex flex-col mt-4">
-                                <div className="border border-gray-300 rounded-md">
-                                   <textarea 
-                                       className="w-full rounded-md p-3 text-[15px] h-32 focus:outline-none placeholder-gray-500 resize-none"
-                                       placeholder="Message"
-                                       value={inviteMessage}
-                                       onChange={(e) => setInviteMessage(e.target.value)}
-                                   />
-                                </div>
-                                <div className="flex justify-end gap-3 mt-4">
-                                    <button 
-                                        onClick={() => {
-                                            setSelectedInvitees([]);
-                                            setInviteSearch('');
-                                            setInviteMessage('');
-                                        }}
-                                        className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
-                                    >
-                                        Cancel
-                                    </button>
-                                    <button 
-                                        onClick={handleSendInvites}
-                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
-                                    >
-                                        Send
-                                    </button>
+                            <div className="flex flex-col mt-6">
+                                <div className="flex justify-between items-center gap-3">
+                                    <CopyInviteLinkButton />
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                            onClick={() => {
+                                                setSelectedInvitees([]);
+                                                setInviteSearch('');
+                                            }}
+                                            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            onClick={handleSendInvites}
+                                            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                                        >
+                                            Send
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         ) : (
                             <div className="mt-6">
                                 <div className="flex justify-between items-center">
-                                    <button 
-                                        onClick={handleCopyLink}
-                                        className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
-                                    >
-                                        <LinkIcon className="w-4 h-4" />
-                                        Copy link
-                                    </button>
-                                    <button 
+                                    <CopyInviteLinkButton />
+                                    <button
                                         onClick={() => setShowInviteMember(false)}
                                         className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
                                     >
@@ -886,41 +1292,161 @@ export default function TeamManagement({ currentUser }: Props) {
             {/* Edit Team Modal */}
             {showEditTeam && actionTeam && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-                        <h3 className="text-lg font-semibold text-gray-900 mb-4">Edit Team</h3>
-                        <div className="space-y-4 mb-6">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Team Name</label>
+                    <div className="bg-white rounded-lg max-w-2xl w-full mx-4 flex flex-col max-h-[85vh]">
+                        <div className="flex justify-between items-center p-6 pb-4">
+                            <h3 className="text-lg font-semibold text-gray-900">Edit Team</h3>
+                            <button className="p-2 hover:bg-gray-100 rounded-full text-gray-600" onClick={() => setShowEditTeam(false)}>
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto px-6">
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Team Name</label>
+                                    <input
+                                        type="text"
+                                        value={editTeamName}
+                                        onChange={(e) => setEditTeamName(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                        placeholder="Enter team name"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                                    <textarea
+                                        value={editTeamDesc}
+                                        onChange={(e) => setEditTeamDesc(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                        placeholder="Enter team description"
+                                        rows={3}
+                                    />
+                                </div>
+                                <div className="flex items-center gap-4">
+                                    <label className="block text-sm font-medium text-gray-700">Team Color</label>
+                                    <input
+                                        type="color"
+                                        value={editTeamColor}
+                                        onChange={(e) => setEditTeamColor(e.target.value)}
+                                        className="h-10 w-16 cursor-pointer rounded border border-gray-300 p-0.5"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Add existing people */}
+                            <div className="border-t border-gray-200 mt-6 pt-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Add People</label>
+                                <p className="text-xs text-gray-500 mb-2">
+                                    Search anyone who already has an account. To bring in someone new, use Invite Team Member.
+                                </p>
                                 <input
                                     type="text"
-                                    value={editTeamName}
-                                    onChange={(e) => setEditTeamName(e.target.value)}
+                                    value={addMemberSearch}
+                                    onChange={(e) => setAddMemberSearch(e.target.value)}
+                                    onFocus={() => setAddMemberFocused(true)}
+                                    onBlur={() => setAddMemberFocused(false)}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                                    placeholder="Enter team name"
+                                    placeholder="Search by name or email"
                                 />
+
+                                {(addMemberFocused || addMemberSearch.trim()) && (
+                                    <div className="mt-2 border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-56 overflow-y-auto">
+                                        {addMemberCandidates.length === 0 ? (
+                                            <div className="px-3 py-3 text-sm text-gray-500">No matching people.</div>
+                                        ) : addMemberCandidates.map(user => {
+                                            const otherTeam = teams.find(t => t.id !== actionTeam.id && user.teamIds.includes(t.id));
+                                            return (
+                                                <div key={user.id} className="flex items-center gap-3 px-3 py-2">
+                                                    <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-xs font-medium text-blue-700 shrink-0">
+                                                        {user.name.split(' ').map(n => n[0]).join('')}
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="text-sm text-gray-900 truncate">{user.name}</div>
+                                                        <div className="text-xs text-gray-500 truncate">{user.email}</div>
+                                                    </div>
+                                                    {otherTeam && (
+                                                        <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">
+                                                            On {otherTeam.name}
+                                                        </span>
+                                                    )}
+                                                    <button
+                                                        // Keeps focus in the search box so the list does not close mid-click
+                                                        onMouseDown={(e) => e.preventDefault()}
+                                                        onClick={() => handleAddExistingMember(user.id)}
+                                                        disabled={!!otherTeam}
+                                                        title={otherTeam ? `Remove ${user.name} from ${otherTeam.name} first` : undefined}
+                                                        className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                                                    >
+                                                        Add
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                                <textarea
-                                    value={editTeamDesc}
-                                    onChange={(e) => setEditTeamDesc(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                                    placeholder="Enter team description"
-                                    rows={3}
-                                />
-                            </div>
-                            <div className="flex items-center gap-4">
-                                <label className="block text-sm font-medium text-gray-700">Team Color</label>
-                                <input
-                                    type="color"
-                                    value={editTeamColor}
-                                    onChange={(e) => setEditTeamColor(e.target.value)}
-                                    className="h-10 w-16 cursor-pointer rounded border border-gray-300 p-0.5"
-                                />
+
+                            {/* Current members and their roles */}
+                            <div className="border-t border-gray-200 mt-6 pt-4 pb-2">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    Members ({actionTeam.memberIds.length})
+                                </label>
+                                {actionTeam.memberIds.length === 0 ? (
+                                    <p className="text-sm text-gray-500">Nobody on this team yet.</p>
+                                ) : (
+                                    <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+                                        {users.filter(u => actionTeam.memberIds.includes(u.id)).map(member => {
+                                            const isProtected = member.role === 'super_admin';
+                                            return (
+                                                <div key={member.id} className="flex items-center gap-3 px-3 py-2">
+                                                    <div
+                                                        className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-medium shrink-0"
+                                                        style={{ backgroundColor: actionTeam.color }}
+                                                    >
+                                                        {member.name.split(' ').map(n => n[0]).join('')}
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="text-sm text-gray-900 truncate">{member.name}</div>
+                                                        <div className="text-xs text-gray-500 truncate">{member.email}</div>
+                                                    </div>
+
+                                                    {canEditRoles && !isProtected ? (
+                                                        <select
+                                                            value={member.role}
+                                                            onChange={(e) => updateMemberRole(member.id, e.target.value)}
+                                                            className="pl-2 pr-6 py-1 bg-white border border-gray-300 rounded text-xs appearance-none focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer shrink-0"
+                                                            style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' stroke='%239ca3af' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center' }}
+                                                        >
+                                                            {/* A role the viewer cannot assign still shows, so the select never lies about the current value */}
+                                                            {(assignableRoles.includes(member.role) ? assignableRoles : [member.role, ...assignableRoles]).map(role => (
+                                                                <option key={role} value={role}>
+                                                                    {role.replace('_', ' ').replace(/^./, c => c.toUpperCase())}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    ) : (
+                                                        <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded capitalize shrink-0">
+                                                            {member.role.replace('_', ' ')}
+                                                        </span>
+                                                    )}
+
+                                                    {canEditRoles && !isProtected && (
+                                                        <button
+                                                            onClick={() => handleRemoveMember(actionTeam.id, member.id)}
+                                                            className="px-2 py-1 border border-red-300 text-red-700 rounded text-xs hover:bg-red-50 shrink-0"
+                                                        >
+                                                            Remove
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
                         </div>
 
-                        <div className="flex justify-end gap-2">
+                        <div className="flex justify-end gap-2 p-6 pt-4 border-t border-gray-200">
                             <button
                                 onClick={() => setShowEditTeam(false)}
                                 className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"

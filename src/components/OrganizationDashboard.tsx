@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { User, Task } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { AlertCircle, CheckCircle, Clock, TrendingUp, Users as UsersIcon, Briefcase, Tag, Globe, Grid, Share2 } from 'lucide-react';
@@ -12,6 +12,12 @@ interface Props {
     currentUser: User;
     isPublic?: boolean;
 }
+
+// Public dashboard shows a rolling window of teams: one slot swaps out at a time
+// so every team gets airtime without the card growing past four rows.
+const VISIBLE_TEAM_SLOTS = 4;
+const TEAM_ROTATE_INTERVAL_MS = 4500;
+const TEAM_SWAP_EXIT_MS = 400;
 
 export default function OrganizationDashboard({ currentUser, isPublic }: Props) {
     const { tasks: allTasks, teams, users, clients, regions, allTags } = useData();
@@ -50,7 +56,7 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
             t.status === 'accepted'
         ).length,
         unassignedTasks: tasks.filter(t => !t.assignedToId).length,
-        managerReviewRequired: tasks.filter(t => t.status === 'manager_review_required').length,
+        inReview: tasks.filter(t => t.status === 'in_review').length,
         overdueTasks: tasks.filter(t => {
             if (t.status === 'completed' || t.status === 'cancelled') return false;
             return new Date(t.dueDate) < new Date('2026-07-28');
@@ -83,6 +89,62 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
             utilization: totalCapacity > 0 ? (scheduledHours / (totalCapacity * 5)) * 100 : 0 // Rough weekly estimate
         };
     });
+
+    // Rolling window of teams for the public dashboard
+    const rotateTeams = !!isPublic && teamWorkload.length > VISIBLE_TEAM_SLOTS;
+    const teamIdsKey = teamWorkload.map(({ team }) => team.id).join('|');
+    const teamIdsRef = useRef<string[]>([]);
+    teamIdsRef.current = teamWorkload.map(({ team }) => team.id);
+
+    const [visibleTeamIds, setVisibleTeamIds] = useState<string[]>([]);
+    const [exitingSlot, setExitingSlot] = useState<number | null>(null);
+
+    // Keep the window in sync with the available teams (never repeating a team)
+    useEffect(() => {
+        const ids = teamIdsRef.current;
+        const slotCount = Math.min(VISIBLE_TEAM_SLOTS, ids.length);
+        setVisibleTeamIds(prev => {
+            const kept = prev.filter(id => ids.includes(id)).slice(0, slotCount);
+            const pool = ids.filter(id => !kept.includes(id));
+            return [...kept, ...pool.slice(0, slotCount - kept.length)];
+        });
+    }, [teamIdsKey]);
+
+    // Swap one random slot for a team that isn't currently on screen
+    useEffect(() => {
+        if (!rotateTeams) {
+            setExitingSlot(null);
+            return;
+        }
+
+        let swapTimer: ReturnType<typeof setTimeout>;
+        const rotateTimer = setInterval(() => {
+            const slot = Math.floor(Math.random() * VISIBLE_TEAM_SLOTS);
+            setExitingSlot(slot);
+            swapTimer = setTimeout(() => {
+                setVisibleTeamIds(prev => {
+                    const pool = teamIdsRef.current.filter(id => !prev.includes(id));
+                    if (pool.length === 0 || slot >= prev.length) return prev;
+                    const next = [...prev];
+                    next[slot] = pool[Math.floor(Math.random() * pool.length)];
+                    return next;
+                });
+                setExitingSlot(null);
+            }, TEAM_SWAP_EXIT_MS);
+        }, TEAM_ROTATE_INTERVAL_MS);
+
+        return () => {
+            clearInterval(rotateTimer);
+            clearTimeout(swapTimer);
+            setExitingSlot(null);
+        };
+    }, [rotateTeams, teamIdsKey]);
+
+    const displayedTeamWorkload = rotateTeams
+        ? visibleTeamIds
+            .map(id => teamWorkload.find(({ team }) => team.id === id))
+            .filter((entry): entry is typeof teamWorkload[number] => Boolean(entry))
+        : teamWorkload;
 
     // Recent tasks requiring attention
     const tasksRequiringAttention = tasks
@@ -219,8 +281,8 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
                 <div className="bg-white rounded-lg border border-gray-200 p-5">
                     <div className="flex items-center justify-between">
                         <div>
-                            <div className="text-sm text-gray-600">Manager Review</div>
-                            <div className="text-2xl font-semibold text-orange-600 mt-1">{stats.managerReviewRequired}</div>
+                            <div className="text-sm text-gray-600">In Review</div>
+                            <div className="text-2xl font-semibold text-orange-600 mt-1">{stats.inReview}</div>
                         </div>
                         <div className="w-12 h-12 bg-orange-100 rounded-lg flex items-center justify-center">
                             <AlertCircle className="w-6 h-6 text-orange-600" />
@@ -263,33 +325,45 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
 
             <div className="grid grid-cols-2 gap-6">
                 {/* Team Capacity Overview */}
-                <div className="bg-white rounded-lg border border-gray-200 p-6">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Team Capacity Overview</h2>
-                    <div className="space-y-4">
-                        {teamWorkload.map(({ team, taskCount, memberCount, utilization }) => (
-                            <div key={team.id}>
-                                <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2">
-                                        <div
-                                            className="w-3 h-3 rounded"
-                                            style={{ backgroundColor: team.color }}
-                                        ></div>
-                                        <span className="text-sm font-medium text-gray-900">{team.name}</span>
-                                        <span className="text-xs text-gray-500">({memberCount} members)</span>
+                <div className={`bg-white rounded-lg border border-gray-200 p-6 ${isPublic ? 'col-span-2' : ''}`}>
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-lg font-semibold text-gray-900">Team Capacity Overview</h2>
+                        {rotateTeams && (
+                            <span className="text-xs text-gray-400">
+                                Showing {displayedTeamWorkload.length} of {teamWorkload.length} teams
+                            </span>
+                        )}
+                    </div>
+                    <div className={isPublic ? 'grid grid-cols-2 gap-x-10 gap-y-4' : 'space-y-4'}>
+                        {displayedTeamWorkload.map(({ team, taskCount, memberCount, utilization }, index) => (
+                            <div key={rotateTeams ? `slot-${index}` : team.id}>
+                                <div
+                                    key={team.id}
+                                    className={rotateTeams ? (exitingSlot === index ? 'team-slot-exit' : 'team-slot-enter') : undefined}
+                                >
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                            <div
+                                                className="w-3 h-3 rounded"
+                                                style={{ backgroundColor: team.color }}
+                                            ></div>
+                                            <span className="text-sm font-medium text-gray-900">{team.name}</span>
+                                            <span className="text-xs text-gray-500">({memberCount} members)</span>
+                                        </div>
+                                        <div className="text-sm text-gray-600">{taskCount} active tasks</div>
                                     </div>
-                                    <div className="text-sm text-gray-600">{taskCount} active tasks</div>
-                                </div>
-                                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                                    <div
-                                        className="h-full rounded-full"
-                                        style={{
-                                            width: `${Math.min(100, utilization)}%`,
-                                            backgroundColor: utilization >= 80 ? '#EF4444' : utilization >= 50 ? '#F59E0B' : '#10B981'
-                                        }}
-                                    ></div>
-                                </div>
-                                <div className="text-xs text-gray-500 mt-1">
-                                    {utilization.toFixed(0)}% utilized
+                                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                        <div
+                                            className="h-full rounded-full transition-[width] duration-700 ease-out"
+                                            style={{
+                                                width: `${Math.min(100, utilization)}%`,
+                                                backgroundColor: utilization >= 80 ? '#EF4444' : utilization >= 50 ? '#F59E0B' : '#10B981'
+                                            }}
+                                        ></div>
+                                    </div>
+                                    <div className="text-xs text-gray-500 mt-1">
+                                        {utilization.toFixed(0)}% utilized
+                                    </div>
                                 </div>
                             </div>
                         ))}

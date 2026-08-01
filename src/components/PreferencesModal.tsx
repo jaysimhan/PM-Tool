@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { User } from '../types/types';
-import { X, Save, User as UserIcon, Shield, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { X, Save, User as UserIcon, Award } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabaseClient';
+import { useData } from '../contexts/DataContext';
+import { SkillPicker } from './SkillPicker';
 
 interface Props {
     isOpen: boolean;
@@ -12,97 +13,21 @@ interface Props {
 
 export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
     const { updateProfile } = useAuth();
+    const { skills, refreshUsers } = useData();
     const [name, setName] = useState(currentUser.name || '');
+    const [skillIds, setSkillIds] = useState<string[]>(currentUser.skillIds || []);
     const [isSaving, setIsSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    // MFA State
-    const [isMfaEnabled, setIsMfaEnabled] = useState(false);
-    const [mfaLoading, setMfaLoading] = useState(false);
-    const [qrCode, setQrCode] = useState<string | null>(null);
-    const [factorId, setFactorId] = useState<string | null>(null);
-    const [verifyCode, setVerifyCode] = useState('');
-
     useEffect(() => {
         if (isOpen) {
-            checkMfaStatus();
+            // Re-seed from the saved profile each time it opens so an abandoned edit
+            // does not linger (the modal stays mounted between openings).
+            setName(currentUser.name || '');
+            setSkillIds(currentUser.skillIds || []);
+            setError(null);
         }
-    }, [isOpen]);
-
-    const checkMfaStatus = async () => {
-        try {
-            const { data, error } = await supabase.auth.mfa.listFactors();
-            if (error) throw error;
-            const totp = data.all.find(f => f.factor_type === 'totp' && f.status === 'verified');
-            setIsMfaEnabled(!!totp);
-        } catch (err) {
-            console.error('Error checking MFA status:', err);
-        }
-    };
-
-    const handleEnableMfa = async () => {
-        setMfaLoading(true);
-        setError(null);
-        try {
-            const { data, error } = await supabase.auth.mfa.enroll({
-                factorType: 'totp'
-            });
-            if (error) throw error;
-            
-            setFactorId(data.id);
-            setQrCode(data.totp.qr_code);
-        } catch (err: any) {
-            setError(err.message || 'Failed to enroll in 2FA');
-        } finally {
-            setMfaLoading(false);
-        }
-    };
-
-    const handleVerifyMfa = async () => {
-        if (!factorId || !verifyCode) return;
-        setMfaLoading(true);
-        setError(null);
-        try {
-            const { data: challengeData, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
-            if (challengeError) throw challengeError;
-
-            const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({
-                factorId,
-                challengeId: challengeData.id,
-                code: verifyCode
-            });
-            if (verifyError) throw verifyError;
-
-            setIsMfaEnabled(true);
-            setQrCode(null);
-            setFactorId(null);
-            setVerifyCode('');
-        } catch (err: any) {
-            setError(err.message || 'Failed to verify 2FA code');
-        } finally {
-            setMfaLoading(false);
-        }
-    };
-
-    const handleDisableMfa = async () => {
-        setMfaLoading(true);
-        setError(null);
-        try {
-            const { data, error } = await supabase.auth.mfa.listFactors();
-            if (error) throw error;
-            
-            const totp = data.all.find(f => f.factor_type === 'totp' && f.status === 'verified');
-            if (totp) {
-                const { error: unenrollError } = await supabase.auth.mfa.unenroll({ factorId: totp.id });
-                if (unenrollError) throw unenrollError;
-                setIsMfaEnabled(false);
-            }
-        } catch (err: any) {
-            setError(err.message || 'Failed to disable 2FA');
-        } finally {
-            setMfaLoading(false);
-        }
-    };
+    }, [isOpen, currentUser]);
 
     if (!isOpen) return null;
 
@@ -115,7 +40,9 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
         setIsSaving(true);
         setError(null);
         try {
-            await updateProfile({ name: name.trim() });
+            await updateProfile({ name: name.trim(), skillIds });
+            // Team Management reads skills off the shared user list, so pull it forward too.
+            await refreshUsers();
             onClose();
         } catch (err: any) {
             setError(err.message || 'Failed to update preferences');
@@ -187,83 +114,25 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
 
                         <hr className="border-gray-200" />
 
-                        {/* Security Section */}
-                        <div className="space-y-4">
-                            <h3 className="text-md font-semibold text-gray-900 flex items-center gap-2">
-                                <Shield className="w-5 h-5" />
-                                Security Settings
-                            </h3>
-                            
-                            <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 space-y-4">
-                                <div className="flex items-start justify-between gap-4">
-                                    <div className="flex-1 flex flex-col gap-1.5">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <h4 className="text-sm font-medium text-gray-900">
-                                                Two-Factor Authentication (2FA)
-                                            </h4>
-                                            {isMfaEnabled ? (
-                                                <span className="inline-flex whitespace-nowrap items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
-                                                    <ShieldCheck className="w-3 h-3" />
-                                                    Enabled
-                                                </span>
-                                            ) : (
-                                                <span className="inline-flex whitespace-nowrap items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
-                                                    <ShieldAlert className="w-3 h-3" />
-                                                    Disabled
-                                                </span>
-                                            )}
-                                        </div>
-                                        <p className="text-xs text-gray-500">
-                                            Secure your account with an Authenticator app (like Google Authenticator).
-                                        </p>
-                                    </div>
-                                    {!qrCode && (
-                                        <button
-                                            onClick={isMfaEnabled ? handleDisableMfa : handleEnableMfa}
-                                            disabled={mfaLoading}
-                                            className={`px-3 py-1.5 whitespace-nowrap flex-shrink-0 text-sm font-medium rounded-lg transition-colors border shadow-sm ${
-                                                isMfaEnabled
-                                                    ? 'bg-white border-red-200 text-red-600 hover:bg-red-50'
-                                                    : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
-                                            }`}
-                                        >
-                                            {mfaLoading ? '...' : isMfaEnabled ? 'Disable 2FA' : 'Enable 2FA'}
-                                        </button>
-                                    )}
-                                </div>
-
-                                {qrCode && (
-                                    <div className="mt-4 pt-4 border-t border-gray-200">
-                                        <p className="text-sm text-gray-700 font-medium mb-3">Scan this QR Code in your Authenticator app:</p>
-                                        <div className="bg-white p-3 rounded-xl inline-block shadow-sm border border-gray-200">
-                                            <img src={qrCode} alt="2FA QR Code" className="w-48 h-48 object-contain" />
-                                        </div>
-                                        
-                                        <div className="mt-6">
-                                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                                Verification Code
-                                            </label>
-                                            <div className="flex items-center gap-3">
-                                                <input
-                                                    type="text"
-                                                    maxLength={6}
-                                                    value={verifyCode}
-                                                    onChange={(e) => setVerifyCode(e.target.value.replace(/\D/g, ''))}
-                                                    placeholder="123456"
-                                                    className="block w-40 px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 sm:text-sm tracking-widest font-mono text-center text-lg"
-                                                />
-                                                <button
-                                                    onClick={handleVerifyMfa}
-                                                    disabled={mfaLoading || verifyCode.length !== 6}
-                                                    className="px-6 py-2.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-                                                >
-                                                    {mfaLoading ? 'Verifying...' : 'Verify'}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
+                        {/* Skills Section */}
+                        <div className="space-y-3">
+                            <div>
+                                <h3 className="text-md font-semibold text-gray-900 flex items-center gap-2">
+                                    <Award className="w-5 h-5" />
+                                    Skills
+                                </h3>
+                                <p className="mt-1 text-xs text-gray-500">
+                                    Add any skill you work on. You are not limited to your own team's skills &mdash;
+                                    pick anything in the organisation. These show up on your profile in Team Management.
+                                </p>
                             </div>
+
+                            <SkillPicker
+                                allSkills={skills}
+                                selectedIds={skillIds}
+                                onChange={setSkillIds}
+                                placeholder="Search skills across all teams..."
+                            />
                         </div>
                     </div>
                 </div>

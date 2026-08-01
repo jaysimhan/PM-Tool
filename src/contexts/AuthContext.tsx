@@ -11,10 +11,42 @@ interface AuthContextType {
     mfaRequired: boolean;
     signOut: () => Promise<void>;
     updateProfile: (updates: Partial<User>) => Promise<void>;
+    refreshProfile: () => Promise<void>;
     checkMfa: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+// Reconciles public.user_skills for one person against the exact set of skills they
+// picked. Shared with onboarding, which writes skills before a profile is in context.
+export async function saveUserSkills(userId: string, skillIds: string[]) {
+    const { data: existingRows, error: readError } = await supabase
+        .from('user_skills')
+        .select('skill_id')
+        .eq('user_id', userId);
+    if (readError) throw readError;
+
+    const desired = new Set(skillIds);
+    const existing = new Set((existingRows || []).map((r: any) => r.skill_id));
+    const toAdd = [...desired].filter(id => !existing.has(id));
+    const toRemove = [...existing].filter(id => !desired.has(id));
+
+    if (toRemove.length > 0) {
+        const { error } = await supabase
+            .from('user_skills')
+            .delete()
+            .eq('user_id', userId)
+            .in('skill_id', toRemove);
+        if (error) throw error;
+    }
+
+    if (toAdd.length > 0) {
+        const { error } = await supabase
+            .from('user_skills')
+            .insert(toAdd.map(skillId => ({ user_id: userId, skill_id: skillId })));
+        if (error) throw error;
+    }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [session, setSession] = useState<Session | null>(null);
@@ -65,14 +97,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const fetchProfile = async (userId: string) => {
         try {
-            const { data, error } = await supabase
-                .from('users')
-                .select('*')
-                .eq('id', userId)
-                .single();
-            
+            const [{ data, error }, { data: teamRows }, { data: skillRows }] = await Promise.all([
+                // maybeSingle, not single: an invited user who has authenticated but not yet
+                // finished onboarding has no profile row, and that is not an error -- it is
+                // what sends them to /welcome.
+                supabase.from('users').select('*').eq('id', userId).maybeSingle(),
+                supabase.from('team_members').select('team_id').eq('user_id', userId),
+                supabase.from('user_skills').select('skill_id').eq('user_id', userId)
+            ]);
+
             if (error) throw error;
-            
+
             if (data) {
                 // Map snake_case to camelCase
                 const userProfile: User = {
@@ -83,10 +118,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     dailyCapacity: data.daily_capacity,
                     avatar: data.avatar,
                     isActive: data.is_active,
-                    teamIds: data.team_ids || [],
-                    skillIds: data.skill_ids || []
+                    onboardingCompleted: data.onboarding_completed === true,
+                    teamIds: (teamRows || []).map((t: any) => t.team_id),
+                    skillIds: (skillRows || []).map((s: any) => s.skill_id)
                 };
                 setProfile(userProfile);
+            } else {
+                setProfile(null);
             }
         } catch (error) {
             console.error('Error fetching user profile:', error);
@@ -104,16 +142,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (updates.name !== undefined) dbUpdates.name = updates.name;
             if (updates.avatar !== undefined) dbUpdates.avatar = updates.avatar;
             if (updates.dailyCapacity !== undefined) dbUpdates.daily_capacity = updates.dailyCapacity;
-            
-            if (Object.keys(dbUpdates).length === 0) return;
 
-            const { error } = await supabase
-                .from('users')
-                .update(dbUpdates)
-                .eq('id', user.id);
-            
-            if (error) throw error;
-            
+            if (Object.keys(dbUpdates).length > 0) {
+                const { error } = await supabase
+                    .from('users')
+                    .update(dbUpdates)
+                    .eq('id', user.id);
+
+                if (error) throw error;
+            }
+
+            // Skills live in their own join table, so they are diffed rather than overwritten.
+            if (updates.skillIds !== undefined) {
+                await saveUserSkills(user.id, updates.skillIds);
+            }
+
             // Refresh profile
             await fetchProfile(user.id);
         } catch (error) {
@@ -122,12 +165,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
+    const refreshProfile = async () => {
+        if (!user) return;
+        await fetchProfile(user.id);
+    };
+
     const signOut = async () => {
         await supabase.auth.signOut();
     };
 
     return (
-        <AuthContext.Provider value={{ session, user, profile, loading, mfaRequired, signOut, updateProfile, checkMfa }}>
+        <AuthContext.Provider value={{ session, user, profile, loading, mfaRequired, signOut, updateProfile, refreshProfile, checkMfa }}>
             {children}
         </AuthContext.Provider>
     );

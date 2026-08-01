@@ -34,6 +34,10 @@ export interface User {
     dailyCapacity: number; // hours per day
     avatar?: string;
     isActive: boolean;
+    // False for someone who has been invited but has not set a password and picked a
+    // team/skills yet. Their profile row exists from the moment the invite is issued,
+    // so absence of a row cannot stand in for this.
+    onboardingCompleted: boolean;
 }
 
 export interface Team {
@@ -102,6 +106,10 @@ export interface Task {
     region?: Region;
     department?: string;
     requesterId: string;
+    // Set for requests that came in through the public share link. Whoever submitted has
+    // no account, so requesterId is null and these carry the identity instead.
+    requesterName?: string;
+    requesterEmail?: string;
     priority?: Priority;
     status: TaskStatus;
     estimatedHours: number;

@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Outlet, NavLink, Link, useNavigate } from 'react-router-dom';
-import { Building2, Users, Calendar, ClipboardList, BarChart3, Settings, Menu, Bell, FileText, Link as LinkIcon, LogOut, Lock, Sliders, GanttChart } from 'lucide-react';
+import { Building2, Users, Calendar, ClipboardList, BarChart3, Settings, Menu, Bell, FileText, Link as LinkIcon, LogOut, Shield, Sliders, GanttChart, UserPlus } from 'lucide-react';
 import { User } from '../types/types';
 import { useAuth } from '../contexts/AuthContext';
 import { Logo } from '../components/Logo';
@@ -20,6 +20,22 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
     const [showNotifications, setShowNotifications] = useState(false);
     const [showProfileMenu, setShowProfileMenu] = useState(false);
     const [showPreferences, setShowPreferences] = useState(false);
+
+    const profileMenuRef = useRef<HTMLDivElement>(null);
+    const notificationsRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        function handleClickOutside(event: MouseEvent) {
+            if (profileMenuRef.current && !profileMenuRef.current.contains(event.target as Node)) {
+                setShowProfileMenu(false);
+            }
+            if (notificationsRef.current && !notificationsRef.current.contains(event.target as Node)) {
+                setShowNotifications(false);
+            }
+        }
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
 
     useEffect(() => {
         setIsMac(navigator.platform.toUpperCase().indexOf('MAC') >= 0);
@@ -47,9 +63,9 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
             items.push({ id: 'reports', label: 'Reports', icon: BarChart3 });
         }
 
-        if (currentUser.role === 'admin' || currentUser.role === 'super_admin') {
-            items.push({ id: 'team-management', label: 'Team & Skills', icon: Settings });
-        }
+        // Everyone can view teams, members, and skills - editing/inviting/managing is
+        // gated inside the page itself (team leaders for their own team, admins for all).
+        items.push({ id: 'team-management', label: 'Team & Skills', icon: Settings });
 
         if (currentUser.role === 'super_admin' || currentUser.role === 'admin') {
             items.push({ id: 'integrations', label: 'Integrations', icon: LinkIcon });
@@ -60,10 +76,20 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
 
     const navItems = getNavigationItems();
 
+    // Same rule Team Management applies to its own invite button: admins anywhere, and a
+    // team leader for the team they are on.
+    const canInvite = currentUser.role === 'super_admin'
+        || currentUser.role === 'admin'
+        || currentUser.role === 'team_leader';
+
+    // The shell owns the viewport: header and sidebar are fixed furniture, and only the main
+    // pane scrolls. This replaces sticky positioning against a hardcoded 73px header, which
+    // was always a few pixels out — the header's real height depends on its content, so the
+    // page scrolled by the difference and took the sidebar with it.
     return (
-        <div className="min-h-screen bg-gray-50">
+        <div className="h-dvh flex flex-col bg-gray-50 overflow-hidden">
             {/* Header */}
-            <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
+            <header className="bg-white border-b border-gray-200 relative z-50 flex-shrink-0">
                 <div className="px-6 py-4">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
@@ -95,7 +121,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                             </Link>
 
                             {/* Notifications */}
-                            <div className="relative ml-2">
+                            <div className="relative ml-2" ref={notificationsRef}>
                                 <button
                                     onClick={() => setShowNotifications(!showNotifications)}
                                     className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors"
@@ -122,7 +148,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                 )}
                             </div>
 
-                            <div className="relative flex items-center ml-2 border-l border-gray-200 pl-4">
+                            <div className="relative flex items-center ml-2 border-l border-gray-200 pl-4" ref={profileMenuRef}>
                                 <button 
                                     onClick={() => setShowProfileMenu(!showProfileMenu)}
                                     className="flex items-center gap-3 hover:bg-gray-50 p-1.5 rounded-lg transition-colors focus:outline-none"
@@ -191,8 +217,8 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                                 }}
                                                 className="w-full flex items-center gap-4 px-6 py-3 text-[15px] text-gray-900 font-medium hover:bg-gray-50 transition-colors"
                                             >
-                                                <Lock className="w-5 h-5 text-gray-600 stroke-[1.5]" />
-                                                Change Password
+                                                <Shield className="w-5 h-5 text-gray-600 stroke-[1.5]" />
+                                                Security Settings
                                             </button>
                                         </div>
                                         <div className="border-t border-gray-200 py-2">
@@ -215,10 +241,10 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                 </div>
             </header>
 
-            <div className="flex">
+            <div className="flex flex-1 min-h-0">
                 {/* Sidebar Navigation */}
-                <aside className={`bg-white border-r border-gray-200 min-h-[calc(100vh-73px)] sticky top-[73px] transition-all duration-300 ${isSidebarOpen ? 'w-64' : 'w-20 flex-shrink-0'}`}>
-                    <nav className="p-4">
+                <aside className={`bg-white border-r border-gray-200 h-full transition-all duration-300 flex flex-col flex-shrink-0 ${isSidebarOpen ? 'w-64' : 'w-20'}`}>
+                    <nav className="p-4 flex-1 overflow-y-auto">
                         <ul className="space-y-1">
                             {navItems.map(item => {
                                 const Icon = item.icon;
@@ -244,10 +270,29 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                             })}
                         </ul>
                     </nav>
+
+                    {/* Inviting is the same job from wherever you start it, so it lives here
+                        rather than only inside a team's section of Team Management. */}
+                    {canInvite && (
+                        <div className="p-4 border-t border-gray-200 flex-shrink-0">
+                            <button
+                                onClick={() => navigate('/team-management', { state: { openInvite: true } })}
+                                title={!isSidebarOpen ? 'Invite Team Member' : undefined}
+                                className="w-full flex items-center overflow-hidden rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition-colors"
+                            >
+                                <div className="flex items-center justify-center h-10 w-12 flex-shrink-0">
+                                    <UserPlus className="w-5 h-5" />
+                                </div>
+                                <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0'}`}>
+                                    Invite Team Member
+                                </span>
+                            </button>
+                        </div>
+                    )}
                 </aside>
 
-                {/* Main Content */}
-                <main className="flex-1 min-w-0">
+                {/* Main Content — the only scroll container on the page */}
+                <main className="flex-1 min-w-0 overflow-y-auto">
                     <Outlet />
                 </main>
             </div>

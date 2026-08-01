@@ -20,6 +20,17 @@ type ViewMode = 'calendar' | 'list' | 'board' | 'timeline';
 type CalendarView = 'day' | 'week' | 'month';
 type SortOption = 'dueDate' | 'priority' | 'assignee' | 'status' | 'hours' | 'employee';
 
+// Chromium drops a collapsed-border table cell's border while the cell is sticky and the
+// table scrolls horizontally, so the frozen columns' edges vanish mid-scroll. An absolutely
+// positioned child isn't a collapsed border, so it survives the scroll and stays glued to
+// the real cell edge (the columns are auto-width, so a fixed offset would misalign).
+const FreezeEdge = ({ side }: { side: 'left' | 'right' }) => (
+    <span
+        aria-hidden
+        className={`pointer-events-none absolute inset-y-0 ${side === 'right' ? 'right-0' : 'left-0'} w-px bg-gray-200`}
+    />
+);
+
 export default function WorkloadDashboard({ currentUser }: Props) {
     const { users, teams, tasks, leaves, clients, regions, allTags, workCategories } = useData();
     const [localTasks, setLocalTasks] = useState(tasks);
@@ -248,8 +259,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                 <table className="w-full">
                     <thead className="bg-gray-50 border-b border-gray-200">
                         <tr>
-                            <th className="sticky left-0 z-20 bg-gray-50 px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48 border-r border-gray-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                            <th className="sticky left-0 z-20 bg-gray-50 px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48 border-r border-gray-200">
                                 Team Member
+                                <FreezeEdge side="right" />
                             </th>
                             {dates.map(date => {
                                 const dateObj = new Date(date);
@@ -268,8 +280,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                     </div>
                                 </th>
                             )})}
-                            <th className="sticky right-0 z-20 bg-gray-50 px-4 py-3 text-center border-l border-gray-200 min-w-[100px] text-[11px] font-semibold text-gray-400 uppercase tracking-widest shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                            <th className="sticky right-0 z-20 bg-gray-50 px-4 py-3 text-center border-l border-gray-200 min-w-[100px] text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
                                 Total
+                                <FreezeEdge side="left" />
                             </th>
                         </tr>
                     </thead>
@@ -277,7 +290,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                         {Object.entries(membersByTeam).map(([teamName, { team, members }]) => (
                             <React.Fragment key={teamName}>
                                 <tr className="bg-gray-50/80">
-                                    <td className="sticky left-0 z-20 bg-gray-50 border-b border-r border-gray-200 px-6 py-2.5 font-medium text-sm text-gray-900 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                                    <td className="sticky left-0 z-20 bg-gray-50 border-b border-r border-gray-200 px-6 py-2.5 font-medium text-sm text-gray-900">
                                         <div className="flex items-center gap-2">
                                             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: team?.color || '#9CA3AF' }}></div>
                                             {teamName}
@@ -285,16 +298,19 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                 <span className="font-semibold text-[#364153] text-[11px]">{members.length}</span>
                                             </div>
                                         </div>
+                                        <FreezeEdge side="right" />
                                     </td>
                                     <td colSpan={dates.length} className="border-b border-gray-200 bg-gray-50/80"></td>
-                                    <td className="sticky right-0 z-20 border-b border-l border-gray-200 bg-gray-50/80 shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.05)]"></td>
+                                    <td className="sticky right-0 z-20 border-b border-l border-gray-200 bg-gray-50/80">
+                                        <FreezeEdge side="left" />
+                                    </td>
                                 </tr>
                                 {members.map(user => {
                                     const userTeam = team;
 
                                     return (
                                 <tr key={user.id} className="hover:bg-gray-50 group transition-colors">
-                                    <td className="sticky left-0 z-10 bg-white group-hover:bg-gray-50 transition-colors px-6 py-4 whitespace-nowrap border-r border-gray-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                                    <td className="sticky left-0 z-10 bg-white group-hover:bg-gray-50 transition-colors px-6 py-4 whitespace-nowrap border-r border-gray-200">
                                         <div className="flex items-center gap-3">
                                             <div
                                                 className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-medium"
@@ -310,6 +326,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                 <div className="text-xs text-gray-500">{userTeam?.name || 'Unassigned'}</div>
                                             </div>
                                         </div>
+                                        <FreezeEdge side="right" />
                                     </td>
 
                                     {dates.map(date => {
@@ -395,7 +412,8 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                     })}
                                     
                                     {/* Total Column */}
-                                    <td className="sticky right-0 z-10 bg-white group-hover:bg-gray-50 transition-colors px-4 py-2 border-l border-gray-200 text-center align-middle shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                                    <td className="sticky right-0 z-10 bg-white group-hover:bg-gray-50 transition-colors px-4 py-2 border-l border-gray-200 text-center align-middle">
+                                        <FreezeEdge side="left" />
                                         {(() => {
                                             const totalHours = dates.reduce((sum, d) => sum + (capacityData[user.id]?.[d]?.scheduledHours || 0), 0);
                                             const totalCapacity = dates.reduce((sum, d) => sum + (capacityData[user.id]?.[d]?.totalCapacity || 8), 0);
@@ -683,6 +701,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                             <tr>
                                 <th className="w-64 min-w-[256px] sticky left-0 z-40 bg-white border-r border-b border-gray-200 px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">
                                     Team Member
+                                    <FreezeEdge side="right" />
                                 </th>
                                 {headerGroups.map((hg, i) => (
                                     <th key={i} colSpan={hg.count} className="border-r border-b border-gray-200 px-4 py-2 text-center text-xs font-semibold text-gray-700 bg-gray-50">
@@ -692,7 +711,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                             </tr>
                             {/* Column Header Row */}
                             <tr>
-                                <th className="w-64 min-w-[256px] sticky left-0 z-40 bg-white border-r border-b border-gray-200"></th>
+                                <th className="w-64 min-w-[256px] sticky left-0 z-40 bg-white border-r border-b border-gray-200">
+                                    <FreezeEdge side="right" />
+                                </th>
                                 {timelineColumns.map((col, idx) => {
                                     const isToday = col.date <= new Date() && col.endDate >= new Date();
                                     const startOffset = Math.max(0, col.date.getTime() - timelineBounds.start.getTime());
@@ -721,6 +742,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                     <span className="font-semibold text-[#364153] text-[11px]">{members.length}</span>
                                                 </div>
                                             </div>
+                                            <FreezeEdge side="right" />
                                         </td>
                                         <td colSpan={timelineColumns.length} className="border-r border-b border-gray-200 bg-gray-50/50 p-0 relative">
                                             <div className="absolute inset-0 flex">
@@ -777,6 +799,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                                                             {renderUserRoleTag(user)}
                                                         </div>
                                                     </div>
+                                                    <FreezeEdge side="right" />
                                                 </td>
                                                 
                                                 {/* Task Rendering Area */}
@@ -875,8 +898,10 @@ export default function WorkloadDashboard({ currentUser }: Props) {
     const PRIORITIES: Priority[] = ['urgent', 'high', 'normal', 'low'];
     const STATUSES: string[] = ['scheduled', 'in_progress', 'in_review', 'on_hold', 'completed'];
 
+    // min-h-full, not min-h-screen: this renders below the dashboard header, so a full
+    // viewport of height here overflows the pane it sits in by exactly that header.
     return (
-        <div className="min-h-screen font-sans" style={{ backgroundColor: '#f9fafb' }}>
+        <div className="min-h-full font-sans" style={{ backgroundColor: '#f9fafb' }}>
             {/* Header */}
             <div className="bg-white border-b border-gray-100">
                 <div className="max-w-screen-xl mx-auto w-full px-8 pt-5 pb-3">

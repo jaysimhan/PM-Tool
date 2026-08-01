@@ -1420,6 +1420,26 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                 <Avatar user={requester} size="xs" />
                                                 <span className="text-sm text-gray-800">{requester.name}</span>
                                             </div>
+                                        ) : task.requesterName ? (
+                                            /* Came in through the public share link, so there is no
+                                               account behind it -- name and email are on the task. */
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-6 h-6 rounded-full bg-gray-200 text-gray-600 text-[10px] font-semibold flex items-center justify-center flex-shrink-0">
+                                                    {task.requesterName.charAt(0).toUpperCase()}
+                                                </div>
+                                                <span className="text-sm text-gray-800">{task.requesterName}</span>
+                                                {task.requesterEmail && (
+                                                    <a
+                                                        href={`mailto:${task.requesterEmail}`}
+                                                        className="text-xs text-blue-600 hover:underline"
+                                                    >
+                                                        {task.requesterEmail}
+                                                    </a>
+                                                )}
+                                                <span className="text-[10px] uppercase tracking-wide text-gray-400 border border-gray-200 rounded px-1 py-0.5">
+                                                    External
+                                                </span>
+                                            </div>
                                         ) : (
                                             <span className="text-sm text-gray-400">Unknown</span>
                                         )}
@@ -1968,7 +1988,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                     </div>
                                                     <div className="flex-1 pt-0.5">
                                                         <p className="text-sm text-gray-600">
-                                                            <span className="font-medium text-gray-900">{requester?.name || 'Unknown'}</span>
+                                                            <span className="font-medium text-gray-900">{requester?.name || task.requesterName || 'Unknown'}</span>
                                                             {' '}submitted this request
                                                         </p>
                                                         <p className="text-xs text-gray-400 mt-0.5">{task.createdDate ? formatDate(task.createdDate) : '—'}</p>
