@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react"
-import { supabase } from '../lib/supabaseClient';
+import { supabase, getSessionPersistence, setSessionPersistence } from '../lib/supabaseClient';
+import { AccessRequestModal, AccessRequestKind } from './AccessRequestModal';
 import { Logo } from './Logo';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
@@ -10,13 +11,17 @@ export function Login() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
-  const [rememberMe, setRememberMe] = useState(false)
+  // Reflects the choice made last time rather than resetting to unticked, so someone who
+  // wants to stay signed in does not have to re-tick it at every sign-in.
+  const [rememberMe, setRememberMe] = useState(getSessionPersistence)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   
   // MFA state
   const [verifyCode, setVerifyCode] = useState("")
   
+  const [accessRequestKind, setAccessRequestKind] = useState<AccessRequestKind | null>(null)
+
   const [hovered, setHovered] = useState(false)
   const [pressed, setPressed] = useState(false)
   const [ripples, setRipples] = useState<{ id: number; x: number; y: number }[]>([])
@@ -37,6 +42,10 @@ export function Login() {
     setError(null)
 
     try {
+        // Before the sign-in, not after: this decides which store the session that is about
+        // to be created gets written to.
+        setSessionPersistence(rememberMe);
+
         const { error } = await supabase.auth.signInWithPassword({
             email,
             password
@@ -379,11 +388,38 @@ export function Login() {
 
           <p className="text-center text-[12px] text-gray-500 mt-6">
             Don't have an account?{" "}
-            <a href="mailto:admin@example.com" className="font-medium transition-colors hover:underline" style={{ color: "#3a74df" }}>
+            <button
+              type="button"
+              onClick={() => setAccessRequestKind('access')}
+              className="font-medium transition-colors hover:underline"
+              style={{ color: "#3a74df" }}
+            >
               Request access
-            </a>
+            </button>
+          </p>
+          {/* A deleted account cannot sign in at all, so this is the only door left for it.
+              A deactivated one is turned away after signing in and offered the same thing
+              there. Neither route says whether the address is known. */}
+          <p className="text-center text-[12px] text-gray-500 mt-2">
+            Account deactivated?{" "}
+            <button
+              type="button"
+              onClick={() => setAccessRequestKind('reactivation')}
+              className="font-medium transition-colors hover:underline"
+              style={{ color: "#3a74df" }}
+            >
+              Request reactivation
+            </button>
           </p>
         </div>
+
+        {accessRequestKind && (
+          <AccessRequestModal
+            kind={accessRequestKind}
+            defaultEmail={email}
+            onClose={() => setAccessRequestKind(null)}
+          />
+        )}
 
         {/* Footer */}
         <p className="absolute bottom-6 text-[11px] text-gray-400">

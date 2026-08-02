@@ -84,7 +84,7 @@ export default function ManagerReview({ currentUser }: Props) {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-semibold text-gray-900">Manager Review Queue</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">Review Queue</h1>
         <p className="text-sm text-gray-600 mt-1">Tasks and capacity issues requiring management attention</p>
       </div>
 
@@ -133,7 +133,7 @@ export default function ManagerReview({ currentUser }: Props) {
 
         {managerReviewTasks.length === 0 ? (
           <div className="text-center py-8 text-gray-500 text-sm">
-            No tasks requiring manager review
+            No tasks requiring review
           </div>
         ) : (
           <div className="space-y-4">

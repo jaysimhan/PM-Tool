@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { User } from '../types/types';
 import { FileText, Send, X, Link as LinkIcon, Settings, Copy, Eye, Calendar, Search, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
@@ -8,27 +7,67 @@ import { SingleDatePicker } from './SingleDatePicker';
 import { format } from 'date-fns';
 import { getRandomColor } from '../utils/colors';
 import { embedText, warmEmbeddingModel } from '../utils/embeddings';
+import { CustomFieldInput } from './CustomFieldInput';
+import { CustomizeFormModal } from './CustomizeFormModal';
+import {
+    CustomFieldValue,
+    RequestFormField,
+    coreFields,
+    customFieldsFor,
+    defaultCustomValues,
+    firstMissingCustomField,
+    pruneCustomValues,
+    serializeCustomValues,
+    useRequestFormConfig,
+} from '../lib/requestFormConfig';
 import toast from 'react-hot-toast';
 
 interface Props {
     currentUser: User;
 }
 
-export default function RequestForm({ currentUser }: Props) {
-    const { refreshTasks, refreshClients, workCategories, skills, clients, tasks, regions, allTags, refreshTags } = useData();
+const emptyForm = {
+    title: '',
+    description: '',
+    categoryId: '',
+    clientId: '',
+    department: '',
+    priority: 'normal',
+    dueDate: '',
+    estimatedHours: '',
+    tags: '',
+    regionId: ''
+};
 
-    const [formData, setFormData] = useState({
-        title: '',
-        description: '',
-        categoryId: '',
-        clientId: '',
-        department: '',
-        priority: 'normal',
-        dueDate: '',
-        estimatedHours: '',
-        tags: '',
-        regionId: ''
-    });
+/**
+ * Labels for the core fields. The configured label wins; `fallback` covers the case where
+ * the config could not be read and FALLBACK_FIELDS is standing in.
+ */
+function Label({ field, fallback, suffix }: { field?: RequestFormField; fallback: string; suffix?: string }) {
+    return (
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+            {field?.label ?? fallback}
+            {suffix}
+            {(field?.required ?? false) && <span className="text-red-500"> *</span>}
+        </label>
+    );
+}
+
+function Hint({ field }: { field?: RequestFormField }) {
+    if (!field?.helpText) return null;
+    return <p className="text-xs text-gray-500 mt-1">{field.helpText}</p>;
+}
+
+export default function RequestForm({ currentUser }: Props) {
+    const { refreshTasks, refreshClients, skills, clients, regions, allTags, refreshTags } = useData();
+
+    // What the form looks like is configuration now, not a literal in this file. Every
+    // label, placeholder, default and required marker below comes from here.
+    const { fields: formFields, loading: configLoading, error: configError, apply: applyConfig } = useRequestFormConfig();
+    const core = useMemo(() => coreFields(formFields), [formFields]);
+
+    const [formData, setFormData] = useState(emptyForm);
+    const [customValues, setCustomValues] = useState<Record<string, CustomFieldValue>>({});
 
     const [showSuccess, setShowSuccess] = useState(false);
     const [lastRequestRef, setLastRequestRef] = useState<string | null>(null);
@@ -53,11 +92,47 @@ export default function RequestForm({ currentUser }: Props) {
 
     const isAdmin = currentUser.role === 'super_admin' || currentUser.role === 'admin';
     const shareUrl = shareLink ? `${window.location.origin}/request/${shareLink.token}` : '';
+    const inputClass = `w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`;
 
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [matchedSkills, setMatchedSkills] = useState(skills);
     const [isSearchingSkills, setIsSearchingSkills] = useState(false);
     const categorySearchRequestId = useRef(0);
+
+    // Base extras plus whatever is scoped to the chosen work category. Recomputed as the
+    // category changes, which is what makes category-specific fields appear and vanish.
+    const visibleCustomFields = useMemo(
+        () => customFieldsFor(formFields, formData.categoryId || null),
+        [formFields, formData.categoryId],
+    );
+
+    /** A blank form with the configured defaults already filled in. */
+    const blankForm = () => ({
+        ...emptyForm,
+        title: core.title?.defaultValue ?? '',
+        description: core.description?.defaultValue ?? '',
+        department: core.department?.defaultValue ?? '',
+        estimatedHours: core.estimatedHours?.defaultValue ?? '',
+        priority: core.priority?.defaultValue ?? 'normal',
+    });
+
+    // Defaults are applied once, when the config first arrives -- re-running would wipe
+    // whatever the requester has typed in the meantime.
+    const defaultsApplied = useRef(false);
+    useEffect(() => {
+        if (configLoading || defaultsApplied.current) return;
+        defaultsApplied.current = true;
+        setFormData(blankForm());
+    }, [configLoading, core]);
+
+    // Seed defaults for newly visible custom fields and drop answers to fields that are no
+    // longer on screen, so switching category cannot smuggle the old category's answers in.
+    useEffect(() => {
+        setCustomValues(prev => ({
+            ...defaultCustomValues(visibleCustomFields),
+            ...pruneCustomValues(prev, visibleCustomFields),
+        }));
+    }, [visibleCustomFields]);
 
     // Kick off the embedding model download as soon as the form mounts so the
     // first keystroke in Work Category doesn't pay the cold-start cost.
@@ -200,11 +275,25 @@ export default function RequestForm({ currentUser }: Props) {
         window.open(`${shareUrl}?preview=1`, '_blank', 'noopener,noreferrer');
     };
 
+    /** Is this core field on the form? A field with no row at all stays on. */
+    const on = (key: keyof typeof core) => core[key]?.enabled ?? true;
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
 
-        if (!formData.categoryId) {
-            toast.error('Please select a work category.');
+        // Two required fields the browser cannot police: the category picker only counts
+        // once a suggestion is chosen, and the due date is a div, not an input.
+        if (on('category') && core.category?.required && !formData.categoryId) {
+            toast.error(`Please select a ${(core.category.label || 'work category').toLowerCase()}.`);
+            return;
+        }
+        if (on('dueDate') && core.dueDate?.required && !formData.dueDate) {
+            toast.error(`${core.dueDate.label} is required.`);
+            return;
+        }
+        const missingCustom = firstMissingCustomField(visibleCustomFields, customValues);
+        if (missingCustom) {
+            toast.error(`${missingCustom} is required.`);
             return;
         }
 
@@ -213,14 +302,17 @@ export default function RequestForm({ currentUser }: Props) {
         try {
             const { data: taskData, error } = await supabase.from('tasks').insert({
                 title: formData.title,
-                description: formData.description,
-                client_id: formData.clientId || null,
-                priority: formData.priority,
-                due_date: formData.dueDate || null,
-                estimated_hours: formData.estimatedHours ? parseFloat(formData.estimatedHours) : null,
+                description: on('description') ? formData.description : null,
+                client_id: on('client') ? formData.clientId || null : null,
+                // A hidden Priority field means the requester was not asked, not that the
+                // request has no priority -- it falls back to the configured default.
+                priority: on('priority') ? formData.priority : core.priority?.defaultValue ?? 'normal',
+                due_date: on('dueDate') ? formData.dueDate || null : null,
+                estimated_hours: on('estimatedHours') && formData.estimatedHours ? parseFloat(formData.estimatedHours) : null,
                 requester_id: currentUser.id,
-                region_id: formData.regionId || null,
-                department: formData.department || null,
+                region_id: on('region') ? formData.regionId || null : null,
+                department: on('department') ? formData.department || null : null,
+                custom_fields: serializeCustomValues(visibleCustomFields, customValues),
                 status: 'new_request'
             }).select().single();
 
@@ -228,7 +320,7 @@ export default function RequestForm({ currentUser }: Props) {
 
             // The Work Category picker searches skills, so the answer belongs in
             // task_skills. It used to be validated as required and then dropped.
-            if (taskData && formData.categoryId) {
+            if (taskData && on('category') && formData.categoryId) {
                 const { error: skillError } = await supabase
                     .from('task_skills')
                     .insert({ task_id: taskData.id, skill_id: formData.categoryId });
@@ -236,7 +328,7 @@ export default function RequestForm({ currentUser }: Props) {
             }
 
             // Check if department is new for this brand and add it if so
-            if (formData.clientId && formData.department) {
+            if (on('client') && on('department') && formData.clientId && formData.department) {
                 const client = clients.find(c => c.id === formData.clientId);
                 if (client) {
                     const existingDepts = client.department 
@@ -257,7 +349,7 @@ export default function RequestForm({ currentUser }: Props) {
             }
 
             // Handle Tags
-            if (formData.tags) {
+            if (on('tags') && formData.tags) {
                 const tagNames = formData.tags.split(',').map(t => t.trim()).filter(Boolean).map(name => name.charAt(0).toUpperCase() + name.slice(1));
                 const uniqueTagNames = Array.from(new Set(tagNames));
                 
@@ -300,18 +392,8 @@ export default function RequestForm({ currentUser }: Props) {
             setShowSuccess(true);
 
             // Reset form
-            setFormData({
-                title: '',
-                description: '',
-                categoryId: '',
-                clientId: '',
-                department: '',
-                priority: 'normal',
-                dueDate: '',
-                estimatedHours: '',
-                tags: '',
-                regionId: ''
-            });
+            setFormData(blankForm());
+            setCustomValues(defaultCustomValues(customFieldsFor(formFields, null)));
             setCategorySearch('');
 
             setTimeout(() => setShowSuccess(false), 3000);
@@ -449,15 +531,22 @@ export default function RequestForm({ currentUser }: Props) {
                     </p>
                 </div>
             )}
+            {configError && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 flex items-start gap-3">
+                    <AlertCircle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+                    <p className="text-sm text-amber-800">
+                        The saved form configuration could not be loaded, so the standard fields are shown instead.
+                        Anything customised is missing from this view. ({configError})
+                    </p>
+                </div>
+            )}
             <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6 space-y-6">
                 {/* Basic Information */}
                 <div className="space-y-4">
                     <h2 className="text-lg font-semibold text-gray-900">Basic Information</h2>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                            Request Title <span className="text-red-500">*</span>
-                        </label>
+                        <Label field={core.title} fallback="Request Title" />
                         <input
                             type="text"
                             name="title"
@@ -465,262 +554,289 @@ export default function RequestForm({ currentUser }: Props) {
                             onChange={handleChange}
                             required
                             disabled={!isAdmin}
-                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                            placeholder="E.g., Social media campaign for product launch"
+                            className={inputClass}
+                            placeholder={core.title?.placeholder ?? 'E.g., Social media campaign for product launch'}
                         />
+                        <Hint field={core.title} />
                     </div>
 
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                            Description <span className="text-red-500">*</span>
-                        </label>
-                        <textarea
-                            name="description"
-                            value={formData.description}
-                            onChange={handleChange}
-                            required
-                            disabled={!isAdmin}
-                            rows={4}
-                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                            placeholder="Provide detailed information about what you need..."
-                        />
-                    </div>
+                    {on('description') && (
+                        <div>
+                            <Label field={core.description} fallback="Description" />
+                            <textarea
+                                name="description"
+                                value={formData.description}
+                                onChange={handleChange}
+                                required={core.description?.required ?? true}
+                                disabled={!isAdmin}
+                                rows={4}
+                                className={inputClass}
+                                placeholder={core.description?.placeholder ?? 'Provide detailed information about what you need...'}
+                            />
+                            <Hint field={core.description} />
+                        </div>
+                    )}
 
                     <div className="grid grid-cols-2 gap-4">
-                        <div ref={categoryFieldRef} className="relative">
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Work Category <span className="text-red-500">*</span>
-                            </label>
-                            <div className="relative">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                        {on('category') && (
+                            <div ref={categoryFieldRef} className="relative">
+                                <Label field={core.category} fallback="Work Category" />
+                                <div className="relative">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                                    <input
+                                        type="text"
+                                        value={categorySearch}
+                                        onChange={(e) => {
+                                            setCategorySearch(e.target.value);
+                                            setFormData(prev => ({ ...prev, categoryId: '' }));
+                                            setShowCategorySuggestions(true);
+                                        }}
+                                        onFocus={() => setShowCategorySuggestions(true)}
+                                        disabled={!isAdmin}
+                                        autoComplete="off"
+                                        className={`w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
+                                        placeholder={core.category?.placeholder ?? 'Search a category...'}
+                                    />
+                                </div>
+                                {showCategorySuggestions && isAdmin && (
+                                    <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-56 overflow-y-auto">
+                                        {isSearchingSkills && (
+                                            <div className="px-3 py-2 text-xs text-gray-400">Searching...</div>
+                                        )}
+                                        {matchedSkills.length > 0 ? (
+                                            matchedSkills.map((skill: { id: string; name: string }) => (
+                                                <button
+                                                    type="button"
+                                                    key={skill.id}
+                                                    onClick={() => selectSkill(skill.id, skill.name)}
+                                                    className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 ${formData.categoryId === skill.id ? 'bg-blue-50 text-blue-700' : 'text-gray-700'}`}
+                                                >
+                                                    {skill.name}
+                                                </button>
+                                            ))
+                                        ) : !isSearchingSkills ? (
+                                            <div className="px-3 py-2 text-sm text-gray-500">No matching categories</div>
+                                        ) : null}
+                                    </div>
+                                )}
+                                <Hint field={core.category} />
+                            </div>
+                        )}
+
+                        {on('client') && (
+                            <div>
+                                <Label field={core.client} fallback="Brand" />
+                                <select
+                                    name="clientId"
+                                    value={formData.clientId}
+                                    onChange={handleChange}
+                                    required={core.client?.required ?? true}
+                                    disabled={!isAdmin}
+                                    className={`w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
+                                >
+                                    <option value="">{core.client?.placeholder ?? 'Select a brand'}</option>
+                                    {clients.map(client => (
+                                        <option key={client.id} value={client.id}>{client.name}</option>
+                                    ))}
+                                </select>
+                                <Hint field={core.client} />
+                            </div>
+                        )}
+
+                        {on('region') && (
+                            <div>
+                                <Label field={core.region} fallback="Region" />
+                                <select
+                                    name="regionId"
+                                    value={formData.regionId}
+                                    onChange={handleChange}
+                                    required={core.region?.required ?? true}
+                                    disabled={!isAdmin}
+                                    className={inputClass}
+                                >
+                                    <option value="">{core.region?.placeholder ?? 'Select a region'}</option>
+                                    {regions.map(region => (
+                                        <option key={region.id} value={region.id}>
+                                            {region.flag} {region.name}
+                                        </option>
+                                    ))}
+                                </select>
+                                <Hint field={core.region} />
+                            </div>
+                        )}
+
+                        {on('department') && (
+                            <div>
+                                <Label field={core.department} fallback="Department" />
                                 <input
                                     type="text"
-                                    value={categorySearch}
-                                    onChange={(e) => {
-                                        setCategorySearch(e.target.value);
-                                        setFormData(prev => ({ ...prev, categoryId: '' }));
-                                        setShowCategorySuggestions(true);
-                                    }}
-                                    onFocus={() => setShowCategorySuggestions(true)}
+                                    name="department"
+                                    value={formData.department}
+                                    onChange={handleChange}
+                                    required={core.department?.required ?? true}
                                     disabled={!isAdmin}
-                                    autoComplete="off"
-                                    className={`w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                                    placeholder="Search a category..."
+                                    list="department-suggestions"
+                                    className={inputClass}
+                                    placeholder={core.department?.placeholder ?? 'Enter or select department'}
                                 />
-                            </div>
-                            {showCategorySuggestions && isAdmin && (
-                                <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-56 overflow-y-auto">
-                                    {isSearchingSkills && (
-                                        <div className="px-3 py-2 text-xs text-gray-400">Searching...</div>
-                                    )}
-                                    {matchedSkills.length > 0 ? (
-                                        matchedSkills.map((skill: { id: string; name: string }) => (
-                                            <button
-                                                type="button"
-                                                key={skill.id}
-                                                onClick={() => selectSkill(skill.id, skill.name)}
-                                                className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 ${formData.categoryId === skill.id ? 'bg-blue-50 text-blue-700' : 'text-gray-700'}`}
-                                            >
-                                                {skill.name}
-                                            </button>
+                                <datalist id="department-suggestions">
+                                    {clients.find(c => c.id === formData.clientId)?.department
+                                        ?.split(',')
+                                        .map(d => d.trim())
+                                        .filter(Boolean)
+                                        .map(dep => (
+                                            <option key={dep} value={dep} />
                                         ))
-                                    ) : !isSearchingSkills ? (
-                                        <div className="px-3 py-2 text-sm text-gray-500">No matching categories</div>
-                                    ) : null}
+                                    }
+                                </datalist>
+                                <Hint field={core.department} />
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Priority and Timeline. The whole section goes when all three are off. */}
+                {(on('priority') || on('dueDate') || on('estimatedHours')) && (
+                    <div className="space-y-4 border-t border-gray-200 pt-6">
+                        <h2 className="text-lg font-semibold text-gray-900">Priority and Timeline</h2>
+
+                        <div className="grid grid-cols-3 gap-4">
+                            {on('priority') && (
+                                <div>
+                                    <Label field={core.priority} fallback="Priority" />
+                                    <select
+                                        name="priority"
+                                        value={formData.priority}
+                                        onChange={handleChange}
+                                        required={core.priority?.required ?? true}
+                                        disabled={!isAdmin}
+                                        className={inputClass}
+                                    >
+                                        <option value="low">Low</option>
+                                        <option value="normal">Normal</option>
+                                        <option value="high">High</option>
+                                        <option value="urgent">Urgent</option>
+                                    </select>
+                                    <Hint field={core.priority} />
+                                </div>
+                            )}
+
+                            {on('dueDate') && (
+                                <div>
+                                    <Label field={core.dueDate} fallback="Due Date" />
+                                    <div className="relative">
+                                        <div
+                                            className={`w-full px-3 py-2 border border-gray-300 rounded-lg flex items-center justify-between cursor-pointer ${!isAdmin ? 'bg-gray-50 text-gray-500 cursor-not-allowed' : 'bg-white hover:border-blue-500'}`}
+                                            onClick={() => isAdmin && setShowDatePicker(true)}
+                                        >
+                                            <span className={formData.dueDate ? 'text-gray-900' : 'text-gray-400'}>
+                                                {formData.dueDate ? format(new Date(formData.dueDate), 'dd/MM/yyyy') : 'dd/mm/yyyy'}
+                                            </span>
+                                            <Calendar className="w-5 h-5 text-gray-400" />
+                                        </div>
+                                        {showDatePicker && isAdmin && (
+                                            <SingleDatePicker
+                                                date={formData.dueDate}
+                                                onChange={(date) => setFormData({ ...formData, dueDate: date })}
+                                                onClose={() => setShowDatePicker(false)}
+                                            />
+                                        )}
+                                    </div>
+                                    <Hint field={core.dueDate} />
+                                </div>
+                            )}
+
+                            {on('estimatedHours') && (
+                                <div>
+                                    <Label field={core.estimatedHours} fallback="Estimated Hours to complete" />
+                                    <input
+                                        type="number"
+                                        name="estimatedHours"
+                                        value={formData.estimatedHours}
+                                        onChange={handleChange}
+                                        required={core.estimatedHours?.required ?? false}
+                                        disabled={!isAdmin}
+                                        min="1"
+                                        step="0.5"
+                                        className={inputClass}
+                                        placeholder={core.estimatedHours?.placeholder ?? 'e.g. 5'}
+                                    />
+                                    <Hint field={core.estimatedHours} />
                                 </div>
                             )}
                         </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Brand <span className="text-red-500">*</span>
-                            </label>
-                            <select
-                                name="clientId"
-                                value={formData.clientId}
-                                onChange={handleChange}
-                                required
-                                disabled={!isAdmin}
-                                className={`w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                            >
-                                <option value="">Select a brand</option>
-                                {clients.map(client => (
-                                    <option key={client.id} value={client.id}>{client.name}</option>
-                                ))}
-                            </select>
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Region <span className="text-red-500">*</span>
-                            </label>
-                            <select
-                                name="regionId"
-                                value={formData.regionId}
-                                onChange={handleChange}
-                                required
-                                disabled={!isAdmin}
-                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                            >
-                                <option value="">Select a region</option>
-                                {regions.map(region => (
-                                    <option key={region.id} value={region.id}>
-                                        {region.flag} {region.name}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                        
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Department <span className="text-red-500">*</span>
-                            </label>
-                            <input
-                                type="text"
-                                name="department"
-                                value={formData.department}
-                                onChange={handleChange}
-                                required
-                                disabled={!isAdmin}
-                                list="department-suggestions"
-                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                                placeholder="Enter or select department"
-                            />
-                            <datalist id="department-suggestions">
-                                {clients.find(c => c.id === formData.clientId)?.department
-                                    ?.split(',')
-                                    .map(d => d.trim())
-                                    .filter(Boolean)
-                                    .map(dep => (
-                                        <option key={dep} value={dep} />
-                                    ))
-                                }
-                            </datalist>
-                        </div>
                     </div>
-                </div>
+                )}
 
-                {/* Priority and Timeline */}
-                <div className="space-y-4 border-t border-gray-200 pt-6">
-                    <h2 className="text-lg font-semibold text-gray-900">Priority and Timeline</h2>
+                {/* Additional Details: tags plus every custom field currently in scope. */}
+                {(on('tags') || visibleCustomFields.length > 0) && (
+                    <div className="space-y-4 border-t border-gray-200 pt-6">
+                        <h2 className="text-lg font-semibold text-gray-900">Additional Details</h2>
 
-                    <div className="grid grid-cols-3 gap-4">
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Priority <span className="text-red-500">*</span>
-                            </label>
-                            <select
-                                name="priority"
-                                value={formData.priority}
-                                onChange={handleChange}
-                                required
-                                disabled={!isAdmin}
-                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                            >
-                                <option value="low">Low</option>
-                                <option value="normal">Normal</option>
-                                <option value="high">High</option>
-                                <option value="urgent">Urgent</option>
-                            </select>
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Due Date <span className="text-red-500">*</span>
-                            </label>
-                            <div className="relative">
-                                <div 
-                                    className={`w-full px-3 py-2 border border-gray-300 rounded-lg flex items-center justify-between cursor-pointer ${!isAdmin ? 'bg-gray-50 text-gray-500 cursor-not-allowed' : 'bg-white hover:border-blue-500'}`}
-                                    onClick={() => isAdmin && setShowDatePicker(true)}
-                                >
-                                    <span className={formData.dueDate ? 'text-gray-900' : 'text-gray-400'}>
-                                        {formData.dueDate ? format(new Date(formData.dueDate), 'dd/MM/yyyy') : 'dd/mm/yyyy'}
-                                    </span>
-                                    <Calendar className="w-5 h-5 text-gray-400" />
-                                </div>
-                                {showDatePicker && isAdmin && (
-                                    <SingleDatePicker
-                                        date={formData.dueDate}
-                                        onChange={(date) => setFormData({ ...formData, dueDate: date })}
-                                        onClose={() => setShowDatePicker(false)}
+                        {on('tags') && (
+                            <div>
+                                <Label field={core.tags} fallback="Tags" suffix=" (comma-separated)" />
+                                <div className={`w-full px-2 py-1.5 border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 flex flex-wrap gap-2 items-center ${!isAdmin ? 'bg-gray-50' : 'bg-white'}`}>
+                                    {formData.tags.split(',').map(t => t.trim()).filter(Boolean).map((tag, idx) => (
+                                        <span key={idx} className="flex items-center gap-1 px-2.5 py-1 bg-blue-100 text-blue-700 text-sm rounded-full">
+                                            {tag}
+                                            {isAdmin && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeTag(tag)}
+                                                    className="hover:bg-blue-200 rounded-full p-0.5 focus:outline-none"
+                                                >
+                                                    <X className="w-3 h-3" />
+                                                </button>
+                                            )}
+                                        </span>
+                                    ))}
+                                    <input
+                                        type="text"
+                                        name="tags"
+                                        value={tagInput}
+                                        onChange={handleTagChange}
+                                        onKeyDown={handleTagKeyDown}
+                                        disabled={!isAdmin}
+                                        className="flex-1 min-w-[120px] bg-transparent focus:outline-none text-sm py-0.5"
+                                        placeholder={(!formData.tags && tagInput === '') ? (core.tags?.placeholder ?? 'campaign, social-media, q3-launch') : ''}
                                     />
-                                )}
+                                </div>
+                                <Hint field={core.tags} />
                             </div>
-                        </div>
+                        )}
 
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Estimated Hours to complete
-                            </label>
-                            <input
-                                type="number"
-                                name="estimatedHours"
-                                value={formData.estimatedHours}
-                                onChange={handleChange}
-                                disabled={!isAdmin}
-                                min="1"
-                                step="0.5"
-                                className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${!isAdmin ? 'bg-gray-50 text-gray-500' : ''}`}
-                                placeholder="e.g. 5"
-                            />
-                        </div>
+                        {visibleCustomFields.map(field => (
+                            <div key={field.id}>
+                                {/* A category-scoped field says so, otherwise it looks like it
+                                    was always there and vanishing on a category change reads
+                                    as a bug rather than as configuration. */}
+                                {field.skillId !== null && (
+                                    <div className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">
+                                        {skills.find(s => s.id === field.skillId)?.name ?? 'Category'} only
+                                    </div>
+                                )}
+                                <CustomFieldInput
+                                    field={field}
+                                    value={customValues[field.fieldKey]}
+                                    disabled={!isAdmin}
+                                    inputClassName={inputClass}
+                                    onChange={(value) => setCustomValues(prev => ({ ...prev, [field.fieldKey]: value }))}
+                                />
+                            </div>
+                        ))}
                     </div>
-                </div>
-
-                {/* Additional Details */}
-                <div className="space-y-4 border-t border-gray-200 pt-6">
-                    <h2 className="text-lg font-semibold text-gray-900">Additional Details</h2>
-
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                            Tags (comma-separated)
-                        </label>
-                        <div className={`w-full px-2 py-1.5 border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 flex flex-wrap gap-2 items-center ${!isAdmin ? 'bg-gray-50' : 'bg-white'}`}>
-                            {formData.tags.split(',').map(t => t.trim()).filter(Boolean).map((tag, idx) => (
-                                <span key={idx} className="flex items-center gap-1 px-2.5 py-1 bg-blue-100 text-blue-700 text-sm rounded-full">
-                                    {tag}
-                                    {isAdmin && (
-                                        <button 
-                                            type="button" 
-                                            onClick={() => removeTag(tag)} 
-                                            className="hover:bg-blue-200 rounded-full p-0.5 focus:outline-none"
-                                        >
-                                            <X className="w-3 h-3" />
-                                        </button>
-                                    )}
-                                </span>
-                            ))}
-                            <input
-                                type="text"
-                                name="tags"
-                                value={tagInput}
-                                onChange={handleTagChange}
-                                onKeyDown={handleTagKeyDown}
-                                disabled={!isAdmin}
-                                className="flex-1 min-w-[120px] bg-transparent focus:outline-none text-sm py-0.5"
-                                placeholder={(!formData.tags && tagInput === '') ? "campaign, social-media, q3-launch" : ""}
-                            />
-                        </div>
-                    </div>
-                </div>
+                )}
 
                 {/* Form Actions */}
                 <div className="flex items-center justify-end gap-3 border-t border-gray-200 pt-6">
                     <button
                         type="button"
                         onClick={() => {
-                            setFormData({
-                                title: '',
-                                description: '',
-                                categoryId: '',
-                                clientId: '',
-                                department: '',
-                                priority: 'normal',
-                                dueDate: '',
-                                estimatedHours: '',
-                                tags: '',
-                                regionId: ''
-                            });
+                            // Reset means "back to how the form opens", which now includes
+                            // whatever defaults an admin configured.
+                            setFormData(blankForm());
+                            setCustomValues(defaultCustomValues(customFieldsFor(formFields, null)));
                             setCategorySearch('');
                             setTagInput('');
                         }}
@@ -891,107 +1007,16 @@ export default function RequestForm({ currentUser }: Props) {
                 </div>
             )}
 
-            {/* Customize Form Modal */}
+            {/* Customize Form Modal. Lives in its own component: it edits
+                request_form_fields and this file only needs the result. */}
             {showCustomizeModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-                        <div className="flex items-center justify-between mb-4">
-                            <div className="flex items-center gap-4">
-                                <h3 className="text-lg font-semibold text-gray-900">Customize Request Form</h3>
-                                <Link 
-                                    to="/form-setup"
-                                    className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-100 flex items-center gap-2"
-                                >
-                                    <Settings className="w-4 h-4" />
-                                    Form Setup
-                                </Link>
-                            </div>
-                            <button onClick={() => setShowCustomizeModal(false)} className="text-gray-400 hover:text-gray-600">
-                                <X className="w-5 h-5" />
-                            </button>
-                        </div>
-
-                        <p className="text-sm text-gray-600 mb-6">
-                            Configure which fields appear on the request form and set default values.
-                        </p>
-
-                        {/* Form Field Configuration */}
-                        <div className="space-y-4 mb-6">
-                            <h4 className="text-sm font-semibold text-gray-900">Form Fields</h4>
-
-                            {[
-                                { id: 'title', label: 'Request Title', required: true },
-                                { id: 'description', label: 'Description', required: true },
-                                { id: 'category', label: 'Work Category', required: true },
-                                { id: 'client', label: 'Brand', required: true },
-                                { id: 'department', label: 'Department', required: true },
-                                { id: 'priority', label: 'Priority', required: false },
-                                { id: 'dueDate', label: 'Due Date', required: true },
-                                { id: 'estimatedHours', label: 'Estimated Hours to complete', required: false },
-                                { id: 'tags', label: 'Tags', required: false },
-                                { id: 'deliverableCount', label: 'Deliverable Quantity', required: false },
-                                { id: 'targetAudience', label: 'Target Audience', required: false },
-                                { id: 'brandGuidelines', label: 'Brand Guidelines', required: false }
-                            ].map(field => (
-                                <div key={field.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                                    <div className="flex items-center gap-3">
-                                        <label className="relative inline-flex items-center cursor-pointer">
-                                            <input type="checkbox" className="sr-only peer" defaultChecked={field.required} />
-                                            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                                        </label>
-                                        <div>
-                                            <div className="text-sm font-medium text-gray-900">{field.label}</div>
-                                            {field.required && (
-                                                <div className="text-xs text-gray-500">Required field</div>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <button className="text-sm text-blue-600 hover:text-blue-700">
-                                        Configure
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
-
-                        {/* Category-Specific Fields */}
-                        <div className="border-t border-gray-200 pt-6 mb-6">
-                            <h4 className="text-sm font-semibold text-gray-900 mb-4">Category-Specific Fields</h4>
-                            <p className="text-sm text-gray-600 mb-4">
-                                Configure custom fields that appear based on the selected work category.
-                            </p>
-
-                            <select className="w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg text-sm mb-3">
-                                <option>Select a category to configure</option>
-                                {workCategories.map(cat => (
-                                    <option key={cat.id}>{cat.name}</option>
-                                ))}
-                            </select>
-
-                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
-                                <strong>Example:</strong> For "Videos" category, you can add fields like: Duration, Format, Aspect Ratio, Voice-over Required, etc.
-                            </div>
-                        </div>
-
-                        <div className="flex items-center justify-end gap-2 border-t border-gray-200 pt-6">
-                            <button
-                                onClick={() => setShowCustomizeModal(false)}
-                                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={() => {
-                                    toast.success('Form configuration saved!');
-                                    setShowCustomizeModal(false);
-                                }}
-                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
-                            >
-                                Save Configuration
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                <CustomizeFormModal
+                    isAdmin={isAdmin}
+                    onClose={() => setShowCustomizeModal(false)}
+                    onSaved={applyConfig}
+                />
             )}
+
         </div>
     );
 }

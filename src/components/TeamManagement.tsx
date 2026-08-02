@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { User } from '../types/types';
-import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon, Edit2, Trash2, Shield } from 'lucide-react';
+import { User, AccessRequest } from '../types/types';
+import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon, Edit2, Trash2, Shield, Copy, Loader2, Mail, Building2, Globe } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
 import { supabase, supabaseAdmin } from '../lib/supabaseClient';
 import toast from 'react-hot-toast';
@@ -80,7 +80,7 @@ const makeTempInvitee = (email: string) => ({
 } as unknown as User);
 
 export default function TeamManagement({ currentUser }: Props) {
-    const { users, teams, skills, refreshTeams, refreshSkills, refreshUsers } = useData();
+    const { users, teams, skills, clients, regions, tasks, comments, refreshTeams, refreshSkills, refreshUsers } = useData();
     const { confirm } = useConfirm();
     const location = useLocation();
     const navigate = useNavigate();
@@ -104,6 +104,11 @@ export default function TeamManagement({ currentUser }: Props) {
     const [showInviteDropdown, setShowInviteDropdown] = useState(false);
     const [inviteRole, setInviteRole] = useState('Editor');
     const [unassignedSearch, setUnassignedSearch] = useState('');
+    // Pending "let me in" requests from the login screen. Admins only -- RLS says the same,
+    // so a non-admin asking for them gets an empty list rather than a hidden one.
+    const [accessRequests, setAccessRequests] = useState<AccessRequest[]>([]);
+    const [busyRequestId, setBusyRequestId] = useState<string | null>(null);
+    const [requestInviteLinks, setRequestInviteLinks] = useState<Record<string, string>>({});
     const [showCreateTeam, setShowCreateTeam] = useState(false);
     const [newTeamName, setNewTeamName] = useState('');
     const [newTeamDesc, setNewTeamDesc] = useState('');
@@ -161,6 +166,14 @@ export default function TeamManagement({ currentUser }: Props) {
     const getSkillName = (skillId: string) => {
         return skills.find(s => s.id === skillId)?.name || skillId;
     };
+    // The brands and regions a member wants work from. Shown beside their skills because the
+    // three together are what decides whether the round robin can hand them anything.
+    const getClientName = (clientId: string) => clients.find(c => c.id === clientId)?.name || clientId;
+    const getRegionLabel = (regionId: string) => {
+        const region = regions.find(r => r.id === regionId);
+        if (!region) return regionId;
+        return region.flag ? `${region.flag} ${region.name}` : region.name;
+    };
 
     // Everyone can view every team's members/skills. Admins and the super admin can
     // manage any team; a team leader can only edit/invite for the team they're on.
@@ -216,50 +229,176 @@ export default function TeamManagement({ currentUser }: Props) {
             .slice(0, 8);
     }, [users, actionTeam, addMemberSearch]);
 
+    // Everything below goes through a SECURITY DEFINER function rather than writing to the
+    // table: who may remove, deactivate or delete is a rule, and a rule that lives only in
+    // which buttons get rendered is not enforced at all -- the anon key can reach these
+    // tables directly. The same calls also demote, sign the person out everywhere and tell
+    // whoever needs to reassign their work.
     const handleRemoveMember = async (teamId: string, userId: string) => {
         const member = users.find(u => u.id === userId);
-        if (member?.role === 'super_admin') {
-            toast.error('The super admin cannot be removed from their team. Transfer ownership first.');
-            return;
-        }
-        confirm('Are you sure you want to remove this member?', async () => {
-            const { error } = await supabase
-                .from('team_members')
-                .delete()
-                .eq('team_id', teamId)
-                .eq('user_id', userId);
+        confirm(
+            `Remove ${member?.name || 'this member'} from the team? They will be signed out everywhere and asked to pick a team next time they log in, and anyone who can reassign their open tasks will be told.`,
+            async () => {
+                const { error } = await supabase.rpc('remove_team_member', {
+                    p_team_id: teamId,
+                    p_user_id: userId
+                });
 
-            if (error) {
-                console.error('Error removing member:', error);
-                toast.error('Error removing member.');
-            } else {
+                if (error) {
+                    console.error('Error removing member:', error);
+                    toast.error(error.message || 'Error removing member.');
+                    return;
+                }
                 await refreshTeams();
                 if (refreshUsers) await refreshUsers();
                 toast.success('Member removed.');
             }
-        });
+        );
     };
 
     // People who belong to no team: invitees who never finished setup, and anyone an admin
     // has taken off a team. They are invisible in the per-team lists, so they get their own.
     const canSeeUnassigned = currentUser.role === 'super_admin' || currentUser.role === 'admin';
+
+    const loadAccessRequests = useCallback(async () => {
+        if (!canSeeUnassigned) return;
+        const { data, error } = await supabase
+            .from('access_requests')
+            .select('id, kind, user_id, name, email, note, status, created_at')
+            .eq('status', 'pending')
+            .order('created_at', { ascending: false });
+        if (error) {
+            console.error('Could not load access requests:', error);
+            return;
+        }
+        setAccessRequests((data || []).map((r: any) => ({
+            id: r.id,
+            kind: r.kind,
+            userId: r.user_id,
+            name: r.name,
+            email: r.email,
+            note: r.note,
+            status: r.status,
+            createdAt: r.created_at
+        })));
+    }, [canSeeUnassigned]);
+
+    useEffect(() => { loadAccessRequests(); }, [loadAccessRequests]);
+
+    const resolveRequest = async (id: string, status: 'invited' | 'dismissed') => {
+        const { error } = await supabase.rpc('resolve_access_request', { p_id: id, p_status: status });
+        if (error) {
+            toast.error(error.message || 'Could not update that request.');
+            return false;
+        }
+        setAccessRequests(prev => prev.filter(r => r.id !== id));
+        return true;
+    };
+
+    // Invited with no team attached: they set a password, then pick their own team, and stay
+    // a 'requester' until they do. Same path an access request implies for a brand new person
+    // and for somebody whose deleted account is coming back as a new one.
+    const inviteFromRequest = async (request: AccessRequest) => {
+        setBusyRequestId(request.id);
+        try {
+            const redirectTo = `${window.location.origin}/welcome`;
+            const inviteData = { name: request.name };
+
+            const { data, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(
+                request.email,
+                { redirectTo, data: inviteData }
+            );
+
+            if (!data?.user) {
+                // Supabase only sends invite email once custom SMTP is set up. Mint the same
+                // link so the admin can pass it on by hand rather than losing the invite.
+                console.error('Error sending invite email via Supabase:', inviteError);
+                const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+                    type: 'invite',
+                    email: request.email,
+                    options: { redirectTo, data: inviteData }
+                });
+                if (linkError || !linkData?.user) {
+                    toast.error(`Could not invite ${request.email}: ${inviteError?.message || linkError?.message || 'unknown error'}`);
+                    return;
+                }
+                if (linkData.properties?.action_link) {
+                    setRequestInviteLinks(prev => ({ ...prev, [request.id]: linkData.properties!.action_link! }));
+                    toast.success(`Invite created for ${request.email}. Copy the link below and send it on.`);
+                }
+            } else {
+                toast.success(`Invite sent to ${request.email}.`);
+            }
+
+            await resolveRequest(request.id, 'invited');
+            if (refreshUsers) await refreshUsers();
+        } finally {
+            setBusyRequestId(null);
+        }
+    };
+
+    const reactivateFromRequest = async (request: AccessRequest) => {
+        const target = users.find(u => u.id === request.userId);
+        if (!target) return;
+        setBusyRequestId(request.id);
+        try {
+            await setUserActive(target, true);
+            await resolveRequest(request.id, 'invited');
+        } finally {
+            setBusyRequestId(null);
+        }
+    };
     const unassignedUsers = useMemo(() => {
         if (!canSeeUnassigned) return [];
         return users
-            .filter(u => u.teamIds.length === 0 && u.role !== 'super_admin')
+            .filter(u => u.teamIds.length === 0 && u.role !== 'super_admin' && !u.deletedAt)
             .filter(u => matchesQuery(u, unassignedSearch))
             .sort((a, b) => a.name.localeCompare(b.name));
     }, [users, canSeeUnassigned, unassignedSearch]);
 
     const setUserActive = async (user: User, isActive: boolean) => {
-        const { error } = await supabase.from('users').update({ is_active: isActive }).eq('id', user.id);
+        const { error } = await supabase.rpc('set_user_active', {
+            p_user_id: user.id,
+            p_active: isActive
+        });
         if (error) {
             console.error('Error changing user active state:', error);
-            toast.error(`Could not ${isActive ? 'reactivate' : 'deactivate'} ${user.name}.`);
+            toast.error(error.message || `Could not ${isActive ? 'reactivate' : 'deactivate'} ${user.name}.`);
             return;
         }
         if (refreshUsers) await refreshUsers();
         toast.success(`${user.name} ${isActive ? 'reactivated' : 'deactivated'}.`);
+    };
+
+    // Only the super admin may delete, and only an account with nothing hanging off it.
+    // Anyone who has actually worked here keeps their name on it and gets deactivated
+    // instead -- the button is not offered, so the rule is visible before it is enforced.
+    const hasHistory = (userId: string) =>
+        tasks.some((t: any) => t.assignedToId === userId || t.requesterId === userId || t.assignedById === userId)
+        || comments.some((c: any) => c.userId === userId);
+
+    const canDeleteAccount = (user: User) =>
+        currentUser.role === 'super_admin'
+        && user.role !== 'super_admin'
+        && user.id !== currentUser.id
+        && !user.deletedAt
+        && !hasHistory(user.id);
+
+    const handleDeleteUser = (user: User) => {
+        confirm(
+            `Delete ${user.name}'s account? Their login is destroyed and they disappear from the app. If they ever come back it will be as a new account, from scratch.`,
+            async () => {
+                const { error } = await supabase.rpc('delete_user_account', { p_user_id: user.id });
+                if (error) {
+                    console.error('Error deleting account:', error);
+                    toast.error(error.message || `Could not delete ${user.name}.`);
+                    return;
+                }
+                await refreshTeams();
+                if (refreshUsers) await refreshUsers();
+                toast.success(`${user.name}'s account was deleted.`);
+            }
+        );
     };
 
     const handleDeactivateUser = (user: User) => {
@@ -795,6 +934,8 @@ export default function TeamManagement({ currentUser }: Props) {
                     <div className="space-y-3">
                         {teamMembers.map(member => {
                             const memberSkills = member.skillIds.map(id => getSkillName(id));
+                            const memberBrands = (member.clientIds || []).map(id => getClientName(id));
+                            const memberRegions = (member.regionIds || []).map(id => getRegionLabel(id));
                             const isProtected = member.role === 'super_admin';
 
                             return (
@@ -839,6 +980,42 @@ export default function TeamManagement({ currentUser }: Props) {
                                                     {memberSkills.length === 0 && (
                                                         <span className="text-xs text-gray-400 italic">
                                                             {member.id === currentUser.id ? 'None yet - add them in Preferences' : 'None yet'}
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                {/* What they want handed to them, as opposed to what they can do */}
+                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
+                                                    <Building2 className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                                                    <span className="text-xs text-gray-600 -ml-1">Brands:</span>
+                                                    {memberBrands.slice(0, 4).map((brand, index) => (
+                                                        <span key={index} className="px-2 py-0.5 bg-blue-50 text-blue-700 text-xs rounded">
+                                                            {brand}
+                                                        </span>
+                                                    ))}
+                                                    {memberBrands.length > 4 && (
+                                                        <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
+                                                            +{memberBrands.length - 4} more
+                                                        </span>
+                                                    )}
+                                                    {memberBrands.length === 0 && (
+                                                        <span className="text-xs text-gray-400 italic">
+                                                            {member.id === currentUser.id ? 'None yet - pick them in Preferences' : 'None yet'}
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
+                                                    <Globe className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                                                    <span className="text-xs text-gray-600 -ml-1">Regions:</span>
+                                                    {memberRegions.map((region, index) => (
+                                                        <span key={index} className="px-2 py-0.5 bg-teal-50 text-teal-700 text-xs rounded">
+                                                            {region}
+                                                        </span>
+                                                    ))}
+                                                    {memberRegions.length === 0 && (
+                                                        <span className="text-xs text-gray-400 italic">
+                                                            {member.id === currentUser.id ? 'None yet - pick them in Preferences' : 'None yet'}
                                                         </span>
                                                     )}
                                                 </div>
@@ -887,12 +1064,31 @@ export default function TeamManagement({ currentUser }: Props) {
                                                             Edit Role
                                                         </button>
                                                     )}
-                                                    {!isProtected && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                                    {/* A team leader can remove people from their own team; deactivating
+                                                        is an admin's call and deleting is the super admin's alone. */}
+                                                    {!isProtected && canManageTeam(t) && (
                                                         <button
                                                             onClick={() => handleRemoveMember(t.id, member.id)}
                                                             className="px-3 py-1 border border-red-300 text-red-700 rounded text-xs hover:bg-red-50"
                                                         >
                                                             Remove
+                                                        </button>
+                                                    )}
+                                                    {!isProtected && member.id !== currentUser.id
+                                                        && (currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                                                        <button
+                                                            onClick={() => member.isActive ? handleDeactivateUser(member) : setUserActive(member, true)}
+                                                            className="px-3 py-1 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
+                                                        >
+                                                            {member.isActive ? 'Deactivate' : 'Reactivate'}
+                                                        </button>
+                                                    )}
+                                                    {canDeleteAccount(member) && (
+                                                        <button
+                                                            onClick={() => handleDeleteUser(member)}
+                                                            className="px-3 py-1 border border-red-300 text-red-700 rounded text-xs hover:bg-red-50"
+                                                        >
+                                                            Delete
                                                         </button>
                                                     )}
                                                 </>
@@ -993,6 +1189,120 @@ export default function TeamManagement({ currentUser }: Props) {
                 ? sortedTeams.map(t => <React.Fragment key={t.id}>{renderTeamSection(t)}</React.Fragment>)
                 : team && renderTeamSection(team)}
 
+            {/* People asking to be let in, from the login screen. Access requests are new
+                faces; reactivation requests are accounts that were switched off. */}
+            {canSeeUnassigned && accessRequests.length > 0 && (
+                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                    <div className="flex items-center justify-between gap-4 mb-1">
+                        <h2 className="text-lg font-semibold text-gray-900">
+                            Access requests
+                            <span className="ml-2 text-sm font-normal text-gray-500">({accessRequests.length})</span>
+                        </h2>
+                    </div>
+                    <p className="text-sm text-gray-600 mb-4">
+                        Inviting somebody sends them account setup. They pick their own team on the way in, and
+                        stay a requester until they do.
+                    </p>
+
+                    <div className="space-y-3">
+                        {accessRequests.map(request => {
+                            const target = request.userId ? users.find(u => u.id === request.userId) : undefined;
+                            const isDeleted = !!target?.deletedAt;
+                            const canReactivate = request.kind === 'reactivation' && !!target && !isDeleted;
+                            const busy = busyRequestId === request.id;
+                            const inviteLink = requestInviteLinks[request.id];
+
+                            return (
+                                <div key={request.id} className="border border-gray-200 rounded-lg p-4">
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <h3 className="text-sm font-medium text-gray-900 truncate">{request.name}</h3>
+                                                <span className={`px-2 py-0.5 text-xs rounded ${
+                                                    request.kind === 'reactivation'
+                                                        ? 'bg-amber-50 text-amber-700'
+                                                        : 'bg-blue-50 text-blue-700'
+                                                }`}>
+                                                    {request.kind === 'reactivation' ? 'Reactivation' : 'New access'}
+                                                </span>
+                                                {isDeleted && (
+                                                    <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
+                                                        Account was deleted
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-xs text-gray-500 mt-0.5">{request.email}</div>
+                                            {request.note && (
+                                                <p className="text-sm text-gray-600 mt-2 whitespace-pre-wrap">{request.note}</p>
+                                            )}
+                                            <div className="text-[11px] text-gray-400 mt-2">
+                                                {new Date(request.createdAt).toLocaleString('en-GB', {
+                                                    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+                                                })}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2 shrink-0">
+                                            {canReactivate ? (
+                                                <button
+                                                    onClick={() => reactivateFromRequest(request)}
+                                                    disabled={busy}
+                                                    className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50"
+                                                >
+                                                    {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                                                    Reactivate
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    onClick={() => inviteFromRequest(request)}
+                                                    disabled={busy}
+                                                    className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50"
+                                                >
+                                                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+                                                    {isDeleted ? 'Invite as new' : 'Invite'}
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => resolveRequest(request.id, 'dismissed')}
+                                                disabled={busy}
+                                                className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+                                            >
+                                                Dismiss
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {inviteLink && (
+                                        <div className="mt-3 flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg p-2">
+                                            <input
+                                                readOnly
+                                                value={inviteLink}
+                                                onFocus={(e) => e.currentTarget.select()}
+                                                className="flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700"
+                                            />
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        await navigator.clipboard.writeText(inviteLink);
+                                                        toast.success('Invite link copied.');
+                                                    } catch {
+                                                        toast.error('Could not copy - select the link and copy it.');
+                                                    }
+                                                }}
+                                                className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 flex items-center gap-1"
+                                            >
+                                                <Copy className="w-3 h-3" />
+                                                Copy
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
             {/* Members without a team -- invisible everywhere else, since every other list
                 is scoped to a team. Admins only. */}
             {canSeeUnassigned && (
@@ -1052,22 +1362,32 @@ export default function TeamManagement({ currentUser }: Props) {
                                         </div>
                                     </div>
 
-                                    {u.isActive ? (
-                                        <button
-                                            onClick={() => handleDeactivateUser(u)}
-                                            className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-red-50 hover:text-red-700 hover:border-red-200 flex items-center gap-2 shrink-0"
-                                        >
-                                            <Trash2 className="w-4 h-4" />
-                                            Deactivate
-                                        </button>
-                                    ) : (
-                                        <button
-                                            onClick={() => setUserActive(u, true)}
-                                            className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 shrink-0"
-                                        >
-                                            Reactivate
-                                        </button>
-                                    )}
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        {u.isActive ? (
+                                            <button
+                                                onClick={() => handleDeactivateUser(u)}
+                                                className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-red-50 hover:text-red-700 hover:border-red-200 flex items-center gap-2"
+                                            >
+                                                Deactivate
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={() => setUserActive(u, true)}
+                                                className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
+                                            >
+                                                Reactivate
+                                            </button>
+                                        )}
+                                        {canDeleteAccount(u) && (
+                                            <button
+                                                onClick={() => handleDeleteUser(u)}
+                                                className="px-3 py-1.5 border border-red-300 text-red-700 rounded-lg text-sm hover:bg-red-50 flex items-center gap-2"
+                                            >
+                                                <Trash2 className="w-4 h-4" />
+                                                Delete
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                             ))}
                         </div>

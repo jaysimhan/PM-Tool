@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { User as SupabaseUser, Session } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabaseClient';
+import { supabase, sessionPersistenceExpired, clearSessionPersistence } from '../lib/supabaseClient';
 import { User } from '../types/types';
 
 interface AuthContextType {
@@ -17,36 +17,60 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Reconciles public.user_skills for one person against the exact set of skills they
-// picked. Shared with onboarding, which writes skills before a profile is in context.
-export async function saveUserSkills(userId: string, skillIds: string[]) {
+/** When the access token in hand was issued, in ms. Null if it cannot be read. */
+const tokenIssuedAt = (accessToken?: string | null): number | null => {
+    if (!accessToken) return null;
+    try {
+        const payload = accessToken.split('.')[1];
+        const claims = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+        return typeof claims.iat === 'number' ? claims.iat * 1000 : null;
+    } catch {
+        return null;
+    }
+};
+
+// Reconciles one of the person-to-thing join tables against the exact set of ids they picked.
+// Diffed rather than deleted-and-reinserted so a save that only adds one row does not churn
+// the rest, and so a failed insert cannot leave somebody with nothing.
+async function saveUserLinks(table: string, column: string, userId: string, ids: string[]) {
     const { data: existingRows, error: readError } = await supabase
-        .from('user_skills')
-        .select('skill_id')
+        .from(table)
+        .select(column)
         .eq('user_id', userId);
     if (readError) throw readError;
 
-    const desired = new Set(skillIds);
-    const existing = new Set((existingRows || []).map((r: any) => r.skill_id));
+    const desired = new Set(ids);
+    const existing = new Set((existingRows || []).map((r: any) => r[column]));
     const toAdd = [...desired].filter(id => !existing.has(id));
     const toRemove = [...existing].filter(id => !desired.has(id));
 
     if (toRemove.length > 0) {
         const { error } = await supabase
-            .from('user_skills')
+            .from(table)
             .delete()
             .eq('user_id', userId)
-            .in('skill_id', toRemove);
+            .in(column, toRemove);
         if (error) throw error;
     }
 
     if (toAdd.length > 0) {
         const { error } = await supabase
-            .from('user_skills')
-            .insert(toAdd.map(skillId => ({ user_id: userId, skill_id: skillId })));
+            .from(table)
+            .insert(toAdd.map(id => ({ user_id: userId, [column]: id })));
         if (error) throw error;
     }
 }
+
+// All three are shared with onboarding, which writes them before a profile is in context.
+export const saveUserSkills = (userId: string, skillIds: string[]) =>
+    saveUserLinks('user_skills', 'skill_id', userId, skillIds);
+
+// The brands and regions someone wants work from. Round-robin assignment reads these.
+export const saveUserClients = (userId: string, clientIds: string[]) =>
+    saveUserLinks('user_clients', 'client_id', userId, clientIds);
+
+export const saveUserRegions = (userId: string, regionIds: string[]) =>
+    saveUserLinks('user_regions', 'region_id', userId, regionIds);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [session, setSession] = useState<Session | null>(null);
@@ -54,6 +78,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [profile, setProfile] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [mfaRequired, setMfaRequired] = useState(false);
+    // users.sessions_revoked_at, as of the last profile load. Set when an admin removes
+    // somebody from their team or deactivates them.
+    const [sessionsRevokedAt, setSessionsRevokedAt] = useState<string | null>(null);
 
     useEffect(() => {
         // Get initial session
@@ -84,6 +111,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return () => subscription.unsubscribe();
     }, []);
 
+    // Two ways a session should stop being one, both checked when the tab is looked at.
+    //
+    // The 30 days are enforced by the storage adapter, which only gets consulted when the
+    // session is read back -- a tab left open for a month would otherwise sail past the
+    // deadline on the copy it already holds in memory.
+    //
+    // A revocation is the admin end of it: being removed from a team or deactivated deletes
+    // the rows in auth.sessions, but the access token already issued stays valid until it
+    // expires. Comparing the revocation against the moment this token was issued closes that
+    // window, and only for tokens older than the revocation -- so signing in afterwards
+    // works normally instead of being bounced straight back out.
+    useEffect(() => {
+        if (!session) return;
+
+        const endExpiredSession = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (sessionPersistenceExpired()) {
+                supabase.auth.signOut();
+                return;
+            }
+            const issuedAt = tokenIssuedAt(session.access_token);
+            if (sessionsRevokedAt && issuedAt && issuedAt < new Date(sessionsRevokedAt).getTime()) {
+                supabase.auth.signOut();
+            }
+        };
+
+        endExpiredSession();
+        document.addEventListener('visibilitychange', endExpiredSession);
+        window.addEventListener('focus', endExpiredSession);
+        return () => {
+            document.removeEventListener('visibilitychange', endExpiredSession);
+            window.removeEventListener('focus', endExpiredSession);
+        };
+    }, [session, sessionsRevokedAt]);
+
     const checkMfa = async () => {
         try {
             const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
@@ -97,13 +159,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const fetchProfile = async (userId: string) => {
         try {
-            const [{ data, error }, { data: teamRows }, { data: skillRows }] = await Promise.all([
+            const [
+                { data, error },
+                { data: teamRows },
+                { data: skillRows },
+                { data: clientRows },
+                { data: regionRows }
+            ] = await Promise.all([
                 // maybeSingle, not single: an invited user who has authenticated but not yet
                 // finished onboarding has no profile row, and that is not an error -- it is
                 // what sends them to /welcome.
                 supabase.from('users').select('*').eq('id', userId).maybeSingle(),
                 supabase.from('team_members').select('team_id').eq('user_id', userId),
-                supabase.from('user_skills').select('skill_id').eq('user_id', userId)
+                supabase.from('user_skills').select('skill_id').eq('user_id', userId),
+                supabase.from('user_clients').select('client_id').eq('user_id', userId),
+                supabase.from('user_regions').select('region_id').eq('user_id', userId)
             ]);
 
             if (error) throw error;
@@ -120,11 +190,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     isActive: data.is_active,
                     onboardingCompleted: data.onboarding_completed === true,
                     teamIds: (teamRows || []).map((t: any) => t.team_id),
-                    skillIds: (skillRows || []).map((s: any) => s.skill_id)
+                    skillIds: (skillRows || []).map((s: any) => s.skill_id),
+                    clientIds: (clientRows || []).map((c: any) => c.client_id),
+                    regionIds: (regionRows || []).map((r: any) => r.region_id),
+                    deletedAt: data.deleted_at || null
                 };
                 setProfile(userProfile);
+                setSessionsRevokedAt(data.sessions_revoked_at || null);
             } else {
                 setProfile(null);
+                setSessionsRevokedAt(null);
             }
         } catch (error) {
             console.error('Error fetching user profile:', error);
@@ -152,9 +227,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 if (error) throw error;
             }
 
-            // Skills live in their own join table, so they are diffed rather than overwritten.
+            // Skills and the brand/region preferences live in their own join tables, so they
+            // are diffed rather than overwritten.
             if (updates.skillIds !== undefined) {
                 await saveUserSkills(user.id, updates.skillIds);
+            }
+            if (updates.clientIds !== undefined) {
+                await saveUserClients(user.id, updates.clientIds);
+            }
+            if (updates.regionIds !== undefined) {
+                await saveUserRegions(user.id, updates.regionIds);
             }
 
             // Refresh profile
@@ -172,6 +254,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const signOut = async () => {
         await supabase.auth.signOut();
+        // Leaving the deadline behind would cut short whoever signs in next on this browser.
+        clearSessionPersistence();
     };
 
     return (

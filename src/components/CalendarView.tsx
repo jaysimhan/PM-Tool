@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { User, Task } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { ChevronLeft, ChevronRight, ChevronDown, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
@@ -22,8 +22,9 @@ type TaskPageMode = 'calendar' | 'list' | 'board' | 'timeline';
 type SortOption = 'dueDate' | 'priority' | 'assignee' | 'status' | 'hours' | 'employee';
 
 export default function CalendarView({ currentUser }: Props) {
-  const { users, teams, tasks, clients, regions, allTags, workCategories } = useData();
+  const { users, teams, tasks, clients, regions, allTags, workCategories, loading } = useData();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [currentDate, setCurrentDate] = useState(new Date('2026-07-28'));
   const [pageMode, setPageMode] = useState<TaskPageMode>('list');
   const [viewMode, setViewMode] = useState<CalendarView>('month');
@@ -153,6 +154,53 @@ export default function CalendarView({ currentUser }: Props) {
   const handleTaskClick = (task: Task) => {
     setSelectedTask(task);
     setIsTaskPanelOpen(true);
+  };
+
+  // A notification about a task links here as /tasks?task=<id>, and that id is looked up in
+  // the unfiltered list: the task someone is being told about is often exactly the one the
+  // page filters hide (completed, cancelled, another team's), and it still has to open.
+  const deepLinkTaskId = searchParams.get('task');
+  const appliedDeepLinkRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!deepLinkTaskId) {
+      appliedDeepLinkRef.current = null;
+      return;
+    }
+    // Each linked id opens the panel once. Task data refreshes on a timer, and without this
+    // the refresh would drag the panel back to the linked task after someone had clicked
+    // through to a different one.
+    if (appliedDeepLinkRef.current === deepLinkTaskId) return;
+
+    const task = tasks.find(t => t.id === deepLinkTaskId);
+    if (task) {
+      appliedDeepLinkRef.current = deepLinkTaskId;
+      setSelectedTask(task);
+      setIsTaskPanelOpen(true);
+      return;
+    }
+    // Still arriving, or gone/not visible to this person. Only give up once the load settles,
+    // and drop the parameter so the stale link cannot reopen anything.
+    if (!loading) {
+      setSearchParams(prev => {
+        const next = new URLSearchParams(prev);
+        next.delete('task');
+        return next;
+      }, { replace: true });
+    }
+  }, [deepLinkTaskId, tasks, loading, setSearchParams]);
+
+  // Closing the panel has to clear the parameter too, otherwise the URL still names the task
+  // and clicking the same notification again would be a no-op.
+  const closeTaskPanel = () => {
+    setIsTaskPanelOpen(false);
+    setSelectedTask(null);
+    if (searchParams.has('task')) {
+      setSearchParams(prev => {
+        const next = new URLSearchParams(prev);
+        next.delete('task');
+        return next;
+      }, { replace: true });
+    }
   };
 
   const handleStatusChange = (taskId: string, newStatus: string) => {
@@ -662,7 +710,7 @@ export default function CalendarView({ currentUser }: Props) {
           { status: 'pending', label: 'Pending', color: 'bg-gray-100' },
           { status: 'awaiting_employee_approval', label: 'Awaiting Approval', color: 'bg-yellow-100' },
           { status: 'in_progress', label: 'In Progress', color: 'bg-blue-100' },
-          { status: 'manager_review_required', label: 'Manager Review', color: 'bg-orange-100' },
+          { status: 'manager_review_required', label: 'Review', color: 'bg-orange-100' },
           { status: 'completed', label: 'Completed', color: 'bg-green-100' }
       ];
 
@@ -1036,10 +1084,7 @@ export default function CalendarView({ currentUser }: Props) {
       <TaskDetailsPanel
         task={selectedTask}
         isOpen={isTaskPanelOpen}
-        onClose={() => {
-          setIsTaskPanelOpen(false);
-          setSelectedTask(null);
-        }}
+        onClose={closeTaskPanel}
         currentUser={currentUser}
         onStatusChange={handleStatusChange}
       />

@@ -108,7 +108,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         }
 
         const team = teams.find(t => t.id === selectedTeamId);
-        return team ? users.filter(u => u.teamIds && u.teamIds.includes(selectedTeamId)) : [];
+        // Same rule as the all-teams branch above: deactivated people are out of workload
+        // planning, which is the whole point of deactivating them.
+        return team ? users.filter(u => u.teamIds && u.teamIds.includes(selectedTeamId) && u.isActive) : [];
     }, [selectedTeamId, visibleTeams, users, tasks, currentUser]);
 
     // Calculate capacity for each user and date

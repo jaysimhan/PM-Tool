@@ -31,6 +31,10 @@ export interface User {
     role: UserRole;
     teamIds: string[];
     skillIds: string[];
+    // The brands and regions this person wants work from. Round-robin assignment honours them;
+    // assigning by hand does not, since it exists for work nobody's preferences covered.
+    clientIds: string[];
+    regionIds: string[];
     dailyCapacity: number; // hours per day
     avatar?: string;
     isActive: boolean;
@@ -38,6 +42,21 @@ export interface User {
     // team/skills yet. Their profile row exists from the moment the invite is issued,
     // so absence of a row cannot stand in for this.
     onboardingCompleted: boolean;
+    // Set on a deleted account. The row survives its login so a reactivation request has a
+    // name to show; nothing else in the app should treat it as a person. Coming back means a
+    // fresh invite and a new row, not the return of this one.
+    deletedAt?: string | null;
+}
+
+export interface AccessRequest {
+    id: string;
+    kind: 'access' | 'reactivation';
+    userId?: string | null;
+    name: string;
+    email: string;
+    note?: string | null;
+    status: 'pending' | 'invited' | 'dismissed';
+    createdAt: string;
 }
 
 export interface Team {
@@ -134,6 +153,9 @@ export interface Task {
     tags: Tag[];
     isSubtask: boolean;
     checklist?: { id: string; text: string; completed: boolean; assigneeId?: string }[];
+    // Answers to the fields an admin added in Customize Request Form, keyed by field_key.
+    // Core fields keep their own columns; only these live in tasks.custom_fields.
+    customFields?: Record<string, string | number | boolean>;
 }
 
 export interface Leave {

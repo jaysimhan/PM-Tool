@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Task, User, Comment, Team, Priority, Tag as TagType } from '../types/types';
 import { supabase } from '../lib/supabaseClient';
 import { useData } from '../contexts/DataContext';
-import { users, clients, workCategories, teams, tasks as allTasks, mockComments } from '../data/mockData';
+import { clients, workCategories, teams, tasks as allTasks, mockComments } from '../data/mockData';
 import {
     X, Calendar, User as UserIcon, Paperclip,
     CheckCircle, Link as LinkIcon, Plus, Clock,
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { getRandomColor, getDiverseColors, getTagStyle } from '../utils/colors';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { formatCustomValue, useRequestFormConfig } from '../lib/requestFormConfig';
 
 const TAG_COLORS = [
     { name: 'default', class: 'bg-gray-100 text-gray-700' },
@@ -58,8 +59,23 @@ const ALL_STATUSES = [
     { value: 'completed', label: 'Completed' },
 ];
 
+/**
+ * Somebody who is deactivated or deleted still owns everything they did -- their comments and
+ * their finished tasks keep their name on them. They are shown greyed out so the history
+ * stays readable without suggesting they are still around to pick anything up.
+ */
+const isDormant = (user?: User | null) => !!user && (user.isActive === false || !!user.deletedAt);
+
+// A task being composed carries a temporary id until it is saved, so anything that talks to
+// the database has to know the difference.
+const SAVED_TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const dormantLabel = (user?: User | null) =>
+    user?.deletedAt ? 'deleted' : user && user.isActive === false ? 'deactivated' : null;
+
 function Avatar({ user, size = 'sm' }: { user?: User | null; size?: 'xs' | 'sm' | 'md' }) {
     const sizeClasses = { xs: 'w-6 h-6 text-[10px]', sm: 'w-8 h-8 text-xs', md: 'w-9 h-9 text-sm' };
+    const dormant = isDormant(user);
 
     if (!user) {
         return (
@@ -83,7 +99,7 @@ function Avatar({ user, size = 'sm' }: { user?: User | null; size?: 'xs' | 'sm' 
             <img
                 src={user.avatar}
                 alt={user.name}
-                className={`${sizeClasses[size]} rounded-full object-cover flex-shrink-0`}
+                className={`${sizeClasses[size]} rounded-full object-cover flex-shrink-0 ${dormant ? 'grayscale opacity-60' : ''}`}
                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
             />
         );
@@ -91,8 +107,8 @@ function Avatar({ user, size = 'sm' }: { user?: User | null; size?: 'xs' | 'sm' 
 
     return (
         <div
-            className={`${sizeClasses[size]} rounded-full flex items-center justify-center text-white font-medium flex-shrink-0`}
-            style={{ backgroundColor: bgColor }}
+            className={`${sizeClasses[size]} rounded-full flex items-center justify-center text-white font-medium flex-shrink-0 ${dormant ? 'opacity-60' : ''}`}
+            style={{ backgroundColor: dormant ? '#9CA3AF' : bgColor }}
         >
             {initials}
         </div>
@@ -114,6 +130,8 @@ function FieldRow({ label, icon, children }: { label: React.ReactNode; icon?: Re
 
 export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, isSubPanel = false, parentTitle = "", depth = 0, onNestedDepthChange, activeDepth, onActiveDepthChange }: Props) {
     const { confirm } = useConfirm();
+    // Only needed to turn a stored field_key back into the label the requester saw.
+    const { fields: requestFormFields } = useRequestFormConfig();
     const isTeamLeaderOfTask = currentUser.role === 'team_leader' && teams.some(t => task?.teamIds.includes(t.id) && t.memberIds.includes(currentUser.id));
     const canDeleteTask = currentUser.role === 'super_admin' || currentUser.role === 'admin' || isTeamLeaderOfTask || task?.requesterId === currentUser.id;
 
@@ -160,7 +178,9 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     const [isEditingSubtasksTitle, setIsEditingSubtasksTitle] = useState(false);
     const [showPriorityInput, setShowPriorityInput] = useState(false);
     const [localTags, setLocalTags] = useState<TagType[]>(task?.tags || []);
-    const { allTags, refreshTags, refreshTasks, regions } = useData();
+    // users comes from the live data context, not mockData: the assignee and collaborator
+    // pickers were reading an array that is empty in every build, so they offered nobody.
+    const { allTags, refreshTags, refreshTasks, regions, users } = useData();
     const [tagSearchQuery, setTagSearchQuery] = useState('');
     const [editingTag, setEditingTag] = useState<string | null>(null);
     const [editingTagName, setEditingTagName] = useState('');
@@ -283,6 +303,34 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
         return () => document.removeEventListener('mousedown', handleClick);
     }, []);
 
+    // What the work needs, to decide who may be handed it. The task's own skills win where it
+    // has them; otherwise the work category's stand in, which is where most tasks get theirs.
+    const [requiredSkillIds, setRequiredSkillIds] = useState<string[]>([]);
+    useEffect(() => {
+        // A blank task being composed has no row yet, so there is nothing to look up and its
+        // temporary id is not a uuid the query would accept.
+        const isSaved = !!task && SAVED_TASK_ID.test(task.id);
+        if (!task) {
+            setRequiredSkillIds([]);
+            return;
+        }
+
+        let cancelled = false;
+        (async () => {
+            let ids: string[] = [];
+            if (isSaved) {
+                const { data } = await supabase.from('task_skills').select('skill_id').eq('task_id', task.id);
+                ids = (data || []).map((r: any) => r.skill_id);
+            }
+            if (ids.length === 0 && task.categoryId) {
+                const { data } = await supabase.from('work_category_skills').select('skill_id').eq('category_id', task.categoryId);
+                ids = (data || []).map((r: any) => r.skill_id);
+            }
+            if (!cancelled) setRequiredSkillIds(ids);
+        })();
+        return () => { cancelled = true; };
+    }, [task?.id, task?.categoryId]);
+
     if (!task) return null;
 
     const assignedUser = localAssignedToId ? users.find(u => u.id === localAssignedToId) : null;
@@ -308,16 +356,54 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
         t.title.toLowerCase().includes(depSearch.toLowerCase())
     ).slice(0, 8);
 
-    // Collaborator picker candidates
+    // Collaborator picker candidates. Somebody deactivated or deleted can still be seen on
+    // the work they did, but cannot be put on any more of it.
     const filteredCollabCandidates = users.filter(u =>
         !localCollaborators.some(c => c.id === u.id) &&
+        !isDormant(u) &&
         u.name.toLowerCase().includes(collabSearch.toLowerCase())
     ).slice(0, 10);
+
+    // Assigning by hand is the fallback for work the round robin could not place, so it is
+    // deliberately wider than the round robin: skill is the only requirement. Brand, region
+    // and team preferences steer automatic assignment and say nothing about who is allowed to
+    // be given the task here. With no skill on record — or nobody holding it — the choice
+    // stays open rather than leaving the picker empty and the task stuck.
+    const assignableUsers = users.filter(u => !isDormant(u));
+    const skilledUsers = requiredSkillIds.length > 0
+        ? assignableUsers.filter(u => (u.skillIds || []).some(id => requiredSkillIds.includes(id)))
+        : [];
+    const assigneeCandidates = (skilledUsers.length > 0 ? skilledUsers : assignableUsers)
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name));
+    const assigneesAreSkillFiltered = skilledUsers.length > 0;
 
     const handleStatusChange = (s: string) => {
         setLocalStatus(s);
         setShowStatusDropdown(false);
         if (onStatusChange) onStatusChange(task.id, s);
+    };
+
+    // Picking someone used to change only this component's copy of the task, so the choice was
+    // gone by the next refresh. Manual assignment is the answer to a task the round robin could
+    // not place, and it has to survive; who did it and when are recorded with it.
+    const handleAssign = async (userId?: string) => {
+        setLocalAssignedToId(userId);
+        task.assignedToId = userId;
+        setShowAssigneePicker(false);
+        if (!SAVED_TASK_ID.test(task.id)) return;
+
+        const { error } = await supabase.from('tasks').update({
+            assignee_id: userId ?? null,
+            assigned_by_id: userId ? currentUser.id : null,
+            assigned_date: userId ? new Date().toISOString() : null
+        }).eq('id', task.id);
+
+        if (error) {
+            console.error('Could not save the assignee:', error);
+            return;
+        }
+        refreshTasks();
     };
 
     const handleMarkComplete = () => {
@@ -425,7 +511,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
 
     const mentionSuggestions = mentionState
         ? mentionState.type === '@'
-            ? users.filter(u => u.name.toLowerCase().includes(mentionState.query.toLowerCase())).slice(0, 5)
+            ? users.filter(u => !isDormant(u) && u.name.toLowerCase().includes(mentionState.query.toLowerCase())).slice(0, 5)
             : teams.filter(t => t.name.toLowerCase().includes(mentionState.query.toLowerCase())).slice(0, 5)
         : [];
 
@@ -970,7 +1056,18 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                 {assignedUser ? (
                                                     <>
                                                         <Avatar user={assignedUser} size="xs" />
-                                                        <span className="text-sm text-gray-800 font-medium group-hover:text-blue-600 transition-colors">{assignedUser.name}</span>
+                                                        <span className={`text-sm font-medium transition-colors ${
+                                                            isDormant(assignedUser)
+                                                                ? 'text-gray-400'
+                                                                : 'text-gray-800 group-hover:text-blue-600'
+                                                        }`}>
+                                                            {assignedUser.name}
+                                                        </span>
+                                                        {dormantLabel(assignedUser) && (
+                                                            <span className="text-[10px] uppercase tracking-wide text-gray-400 border border-gray-200 rounded px-1">
+                                                                {dormantLabel(assignedUser)}
+                                                            </span>
+                                                        )}
                                                     </>
                                                 ) : (
                                                     <button className="text-sm text-gray-400 group-hover:text-blue-600 flex items-center gap-1.5 transition-colors">
@@ -982,23 +1079,20 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                 <div className="absolute top-full left-0 mt-1 w-56 bg-white rounded-xl shadow-lg border border-gray-200 z-50 overflow-hidden">
                                                     <div className="max-h-48 overflow-y-auto py-1">
                                                         <button
-                                                            onClick={() => {
-                                                                setLocalAssignedToId(undefined);
-                                                                task.assignedToId = undefined;
-                                                                setShowAssigneePicker(false);
-                                                            }}
+                                                            onClick={() => handleAssign(undefined)}
                                                             className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2.5 transition-colors text-sm text-gray-600"
                                                         >
                                                             <UserIcon className="w-4 h-4 text-gray-400" /> Unassigned
                                                         </button>
-                                                        {(localCollaborators.length > 0 ? localCollaborators : users).map(u => (
+                                                        {assigneesAreSkillFiltered && (
+                                                            <div className="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wide text-gray-400">
+                                                                Has the required skill
+                                                            </div>
+                                                        )}
+                                                        {assigneeCandidates.map(u => (
                                                             <button
                                                                 key={u.id}
-                                                                onClick={() => {
-                                                                    setLocalAssignedToId(u.id);
-                                                                    task.assignedToId = u.id;
-                                                                    setShowAssigneePicker(false);
-                                                                }}
+                                                                onClick={() => handleAssign(u.id)}
                                                                 className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2.5 transition-colors"
                                                             >
                                                                 <Avatar user={u} size="xs" />
@@ -1413,12 +1507,32 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                         </FieldRow>
                                     )}
 
+                                    {/* Answers to the admin-configured fields. Without this the
+                                        Customize modal would capture data nobody could ever read. */}
+                                    {Object.entries(task.customFields ?? {}).map(([key, value]) => (
+                                        <FieldRow
+                                            key={key}
+                                            label={requestFormFields.find(f => f.fieldKey === key)?.label ?? key}
+                                        >
+                                            <span className="text-sm text-gray-800 whitespace-pre-wrap break-words">
+                                                {formatCustomValue(value)}
+                                            </span>
+                                        </FieldRow>
+                                    ))}
+
                                     {/* Requested by */}
                                     <FieldRow label="Requested by">
                                         {requester ? (
                                             <div className="flex items-center gap-2">
                                                 <Avatar user={requester} size="xs" />
-                                                <span className="text-sm text-gray-800">{requester.name}</span>
+                                                <span className={`text-sm ${isDormant(requester) ? 'text-gray-400' : 'text-gray-800'}`}>
+                                                    {requester.name}
+                                                </span>
+                                                {dormantLabel(requester) && (
+                                                    <span className="text-[10px] uppercase tracking-wide text-gray-400 border border-gray-200 rounded px-1">
+                                                        {dormantLabel(requester)}
+                                                    </span>
+                                                )}
                                             </div>
                                         ) : task.requesterName ? (
                                             /* Came in through the public share link, so there is no
@@ -2040,7 +2154,16 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                     <div className="flex-1">
                                                         <div className="bg-gray-50 border border-gray-200 rounded-xl p-3">
                                                             <div className="flex items-center justify-between mb-1.5">
-                                                                <span className="text-sm font-semibold text-gray-900">{author?.name || 'Unknown'}</span>
+                                                                <span className="flex items-center gap-1.5">
+                                                                    <span className={`text-sm font-semibold ${isDormant(author) ? 'text-gray-400' : 'text-gray-900'}`}>
+                                                                        {author?.name || 'Unknown'}
+                                                                    </span>
+                                                                    {dormantLabel(author) && (
+                                                                        <span className="text-[10px] uppercase tracking-wide text-gray-400 border border-gray-200 rounded px-1">
+                                                                            {dormantLabel(author)}
+                                                                        </span>
+                                                                    )}
+                                                                </span>
                                                                 <span className="text-xs text-gray-400">{timeAgo(comment.createdDate)}</span>
                                                             </div>
                                                             <div className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">

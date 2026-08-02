@@ -56,7 +56,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 { data: regionsData },
                 { data: skillsData },
                 { data: teamSkillsData },
-                { data: userSkillsData }
+                { data: userSkillsData },
+                { data: userClientsData },
+                { data: userRegionsData }
             ] = await Promise.all([
                 supabase.from('users').select('*'),
                 supabase.from('teams').select('*'),
@@ -68,12 +70,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 supabase.from('regions').select('*'),
                 supabase.from('skills').select('id, name, category'),
                 supabase.from('team_skills').select('*'),
-                supabase.from('user_skills').select('*')
+                supabase.from('user_skills').select('*'),
+                supabase.from('user_clients').select('*'),
+                supabase.from('user_regions').select('*')
             ]);
 
             if (usersData) {
                 const members = teamMembersData || [];
                 const uSkills = userSkillsData || [];
+                const uClients = userClientsData || [];
+                const uRegions = userRegionsData || [];
                 const transformedUsers = usersData.map((u: any) => {
                     const userTeams = Array.from(new Set(members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id)));
                     return {
@@ -82,11 +88,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                         email: u.email,
                         role: u.role,
                         skillIds: uSkills.filter((us: any) => us.user_id === u.id).map((us: any) => us.skill_id),
+                        clientIds: uClients.filter((uc: any) => uc.user_id === u.id).map((uc: any) => uc.client_id),
+                        regionIds: uRegions.filter((ur: any) => ur.user_id === u.id).map((ur: any) => ur.region_id),
                         teamIds: userTeams,
                         dailyCapacity: 8,
                         avatar: u.avatar,
                         isActive: u.is_active !== false,
-                        onboardingCompleted: u.onboarding_completed === true
+                        onboardingCompleted: u.onboarding_completed === true,
+                        deletedAt: u.deleted_at || null
                     };
                 }) as unknown as User[];
                 setUsers(transformedUsers);
@@ -131,6 +140,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                     requesterName: t.requester_name || undefined,
                     requesterEmail: t.requester_email || undefined,
                     clientId: t.client_id,
+                    categoryId: t.category_id,
+                    // department was on the Task type and in the database, but never made
+                    // the trip between them -- the request form has always captured it.
+                    department: t.department || undefined,
+                    customFields: t.custom_fields || {},
                     regionId: t.region_id,
                     region: t.region || undefined,
                     parentTaskId: t.parent_task_id,
@@ -178,15 +192,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const [
             { data: usersData },
             { data: teamMembersData },
-            { data: userSkillsData }
+            { data: userSkillsData },
+            { data: userClientsData },
+            { data: userRegionsData }
         ] = await Promise.all([
             supabase.from('users').select('*'),
             supabase.from('team_members').select('*'),
-            supabase.from('user_skills').select('*')
+            supabase.from('user_skills').select('*'),
+            supabase.from('user_clients').select('*'),
+            supabase.from('user_regions').select('*')
         ]);
         if (usersData) {
             const members = teamMembersData || [];
             const uSkills = userSkillsData || [];
+            const uClients = userClientsData || [];
+            const uRegions = userRegionsData || [];
             const transformedUsers = usersData.map((u: any) => {
                 const userTeams = Array.from(new Set(members.filter((m: any) => m.user_id === u.id).map((m: any) => m.team_id)));
                 return {
@@ -197,9 +217,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                     avatar: u.avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${u.name}&backgroundColor=3b82f6`,
                     teamIds: userTeams,
                     skillIds: uSkills.filter((us: any) => us.user_id === u.id).map((us: any) => us.skill_id),
+                    clientIds: uClients.filter((uc: any) => uc.user_id === u.id).map((uc: any) => uc.client_id),
+                    regionIds: uRegions.filter((ur: any) => ur.user_id === u.id).map((ur: any) => ur.region_id),
                     dailyCapacity: 8,
                     isActive: u.is_active !== false,
-                    onboardingCompleted: u.onboarding_completed === true
+                    onboardingCompleted: u.onboarding_completed === true,
+                    deletedAt: u.deleted_at || null
                 };
             }) as unknown as User[];
             setUsers(transformedUsers);
@@ -220,6 +243,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 requesterName: t.requester_name || undefined,
                 requesterEmail: t.requester_email || undefined,
                 clientId: t.client_id,
+                categoryId: t.category_id,
+                department: t.department || undefined,
+                customFields: t.custom_fields || {},
                 regionId: t.region_id,
                 region: t.region || undefined,
                 parentTaskId: t.parent_task_id,

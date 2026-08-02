@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
+import { AccessRequestModal } from './AccessRequestModal';
 
 const PageLoader = () => (
     <div className="flex items-center justify-center h-screen bg-gray-50">
@@ -12,6 +13,7 @@ const PageLoader = () => (
 export function ProtectedRoute() {
     const { session, profile: currentUser, loading: authLoading, mfaRequired, signOut } = useAuth();
     const { teams, loading: dataLoading } = useData();
+    const [showReactivation, setShowReactivation] = useState(false);
 
     if (authLoading || (session && dataLoading)) {
         return <PageLoader />;
@@ -30,16 +32,30 @@ export function ProtectedRoute() {
                 <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-200 max-w-md w-full">
                     <h2 className="text-xl font-bold text-gray-900 mb-2">Your account is deactivated</h2>
                     <p className="text-gray-500 mb-6 text-sm">
-                        An administrator has turned off access for {currentUser.email}. Ask them to
-                        reactivate it if you think this is a mistake.
+                        An administrator has turned off access for {currentUser.email}. Ask for it back
+                        if you think this is a mistake — the admins will be notified.
                     </p>
                     <button
-                        onClick={signOut}
+                        onClick={() => setShowReactivation(true)}
                         className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+                    >
+                        Request reactivation
+                    </button>
+                    <button
+                        onClick={signOut}
+                        className="w-full mt-2 py-2 px-4 border border-gray-300 text-gray-700 hover:bg-gray-50 font-medium rounded-lg transition-colors"
                     >
                         Sign out
                     </button>
                 </div>
+
+                {showReactivation && (
+                    <AccessRequestModal
+                        kind="reactivation"
+                        defaultEmail={currentUser.email}
+                        onClose={() => setShowReactivation(false)}
+                    />
+                )}
             </div>
         );
     }

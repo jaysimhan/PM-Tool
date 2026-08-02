@@ -392,6 +392,12 @@ deno_version = 2
 enabled = true
 verify_jwt = false
 
+# Unlike the one above, this one is for signed-in people only, and says so at the edge as
+# well as inside: it will only ever describe the caller's own sessions.
+[functions.session-locations]
+enabled = true
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54327

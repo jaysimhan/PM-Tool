@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Outlet, NavLink, Link, useNavigate } from 'react-router-dom';
 import { Building2, Users, Calendar, ClipboardList, BarChart3, Settings, Menu, Bell, FileText, Link as LinkIcon, LogOut, Shield, Sliders, GanttChart, UserPlus } from 'lucide-react';
-import { User } from '../types/types';
+import { User, Notification as AppNotification } from '../types/types';
+import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../contexts/AuthContext';
 import { Logo } from '../components/Logo';
 import { GlobalSearch } from '../components/GlobalSearch';
@@ -10,6 +11,17 @@ import { DashboardIcon } from '../components/icons/DashboardIcon';
 
 interface DashboardLayoutProps {
     currentUser: User;
+}
+
+// A notification about a task names the task, not just the page it lives on: /tasks?task=<id>
+// lands on the task list with that task already open in the details panel. /tasks/<id> is
+// accepted as the same thing, because no route serves it and the redirect would otherwise
+// dump the reader on the workload page with no idea which task was meant.
+const TASK_ID_PATH = /^\/tasks\/([0-9a-fA-F-]{36})\/?$/;
+
+function resolveNotificationLink(link: string): string {
+    const match = link.match(TASK_ID_PATH);
+    return match ? `/tasks?task=${match[1]}` : link;
 }
 
 export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
@@ -23,6 +35,68 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
 
     const profileMenuRef = useRef<HTMLDivElement>(null);
     const notificationsRef = useRef<HTMLDivElement>(null);
+
+    // The bell used to say "No new notifications" no matter what; nothing had ever been
+    // written to the table it was supposedly reading. These are real rows, addressed to this
+    // person by RLS, so nobody else's ever arrive here.
+    const [notifications, setNotifications] = useState<AppNotification[]>([]);
+    const unreadCount = notifications.filter(n => !n.isRead).length;
+
+    const loadNotifications = useCallback(async () => {
+        const { data, error } = await supabase
+            .from('notifications')
+            .select('id, type, title, message, link, is_read, created_at')
+            .eq('user_id', currentUser.id)
+            .order('created_at', { ascending: false })
+            .limit(30);
+
+        if (error) {
+            console.error('Could not load notifications:', error);
+            return;
+        }
+        setNotifications((data || []).map((n: any) => ({
+            id: n.id,
+            userId: currentUser.id,
+            type: n.type,
+            title: n.title,
+            message: n.message,
+            link: n.link || undefined,
+            isRead: n.is_read === true,
+            createdDate: n.created_at
+        })));
+    }, [currentUser.id]);
+
+    // On arrival, and then at a pace that suits something nobody is waiting on. Opening the
+    // bell refetches too, so the list is never stale at the moment it is actually read.
+    useEffect(() => {
+        loadNotifications();
+        const interval = setInterval(loadNotifications, 60_000);
+        return () => clearInterval(interval);
+    }, [loadNotifications]);
+
+    const markAllRead = async () => {
+        const unread = notifications.filter(n => !n.isRead).map(n => n.id);
+        if (unread.length === 0) return;
+
+        setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+        const { error } = await supabase
+            .from('notifications')
+            .update({ is_read: true })
+            .in('id', unread);
+        if (error) {
+            console.error('Could not mark notifications read:', error);
+            loadNotifications();
+        }
+    };
+
+    const openNotification = async (notification: AppNotification) => {
+        setShowNotifications(false);
+        if (!notification.isRead) {
+            setNotifications(prev => prev.map(n => (n.id === notification.id ? { ...n, isRead: true } : n)));
+            await supabase.from('notifications').update({ is_read: true }).eq('id', notification.id);
+        }
+        if (notification.link) navigate(resolveNotificationLink(notification.link));
+    };
 
     useEffect(() => {
         function handleClickOutside(event: MouseEvent) {
@@ -56,7 +130,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
         }
 
         if (currentUser.role === 'manager' || currentUser.role === 'super_admin' || currentUser.role === 'admin') {
-            items.push({ id: 'manager-review', label: 'Manager Review', icon: ClipboardList });
+            items.push({ id: 'manager-review', label: 'Review', icon: ClipboardList });
         }
 
         if (['team_leader', 'manager', 'admin', 'super_admin'].includes(currentUser.role)) {
@@ -123,24 +197,72 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                             {/* Notifications */}
                             <div className="relative ml-2" ref={notificationsRef}>
                                 <button
-                                    onClick={() => setShowNotifications(!showNotifications)}
+                                    onClick={() => {
+                                        const opening = !showNotifications;
+                                        setShowNotifications(opening);
+                                        if (opening) loadNotifications();
+                                    }}
                                     className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors"
+                                    aria-label={unreadCount > 0 ? `${unreadCount} unread notifications` : 'Notifications'}
                                 >
                                     <Bell className="w-5 h-5 text-gray-600" />
+                                    {unreadCount > 0 && (
+                                        <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 bg-red-500 text-white text-[10px] font-semibold rounded-full flex items-center justify-center">
+                                            {unreadCount > 9 ? '9+' : unreadCount}
+                                        </span>
+                                    )}
                                 </button>
-                                
+
                                 {showNotifications && (
                                     <div className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50">
-                                        <div className="p-4 border-b border-gray-100">
+                                        <div className="p-4 border-b border-gray-100 flex items-center justify-between">
                                             <h3 className="font-semibold text-gray-900">Notifications</h3>
+                                            {unreadCount > 0 && (
+                                                <span className="text-xs text-gray-500">{unreadCount} unread</span>
+                                            )}
                                         </div>
                                         <div className="max-h-96 overflow-y-auto">
-                                            <div className="p-8 text-center text-gray-500 text-sm">
-                                                No new notifications
-                                            </div>
+                                            {notifications.length === 0 ? (
+                                                <div className="p-8 text-center text-gray-500 text-sm">
+                                                    No new notifications
+                                                </div>
+                                            ) : (
+                                                notifications.map(notification => (
+                                                    <button
+                                                        key={notification.id}
+                                                        onClick={() => openNotification(notification)}
+                                                        className={`w-full text-left px-4 py-3 border-b border-gray-50 last:border-b-0 hover:bg-gray-50 transition-colors ${
+                                                            notification.isRead ? '' : 'bg-blue-50/50'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-start gap-2">
+                                                            {!notification.isRead && (
+                                                                <span className="w-1.5 h-1.5 rounded-full bg-blue-600 mt-1.5 shrink-0" />
+                                                            )}
+                                                            <div className={notification.isRead ? 'pl-3.5' : ''}>
+                                                                <div className="text-sm font-medium text-gray-900">
+                                                                    {notification.title}
+                                                                </div>
+                                                                <div className="text-xs text-gray-600 mt-0.5">
+                                                                    {notification.message}
+                                                                </div>
+                                                                <div className="text-[11px] text-gray-400 mt-1">
+                                                                    {new Date(notification.createdDate).toLocaleString('en-GB', {
+                                                                        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </button>
+                                                ))
+                                            )}
                                         </div>
                                         <div className="p-3 bg-gray-50 text-center border-t border-gray-100">
-                                            <button className="text-sm text-blue-600 font-medium hover:text-blue-700">
+                                            <button
+                                                onClick={markAllRead}
+                                                disabled={unreadCount === 0}
+                                                className="text-sm text-blue-600 font-medium hover:text-blue-700 disabled:text-gray-400 disabled:cursor-not-allowed"
+                                            >
                                                 Mark all as read
                                             </button>
                                         </div>
@@ -212,7 +334,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                             </button>
                                             <button 
                                                 onClick={() => {
-                                                    navigate('/update-password');
+                                                    navigate('/security-settings');
                                                     setShowProfileMenu(false);
                                                 }}
                                                 className="w-full flex items-center gap-4 px-6 py-3 text-[15px] text-gray-900 font-medium hover:bg-gray-50 transition-colors"

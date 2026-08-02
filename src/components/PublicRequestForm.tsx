@@ -3,6 +3,19 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { AlertCircle, Check, Eye, Link2Off, Search, Send, X } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
 import { Logo } from './Logo';
+import { CustomFieldInput } from './CustomFieldInput';
+import {
+    CustomFieldValue,
+    FALLBACK_FIELDS,
+    RequestFormField,
+    coreFields,
+    customFieldsFor,
+    defaultCustomValues,
+    firstMissingCustomField,
+    parseField,
+    pruneCustomValues,
+    serializeCustomValues,
+} from '../lib/requestFormConfig';
 
 /**
  * What the shareable link from "Share Request Form" actually opens: /request/<token>.
@@ -39,6 +52,8 @@ interface FormConfig {
     brands: Brand[];
     regions: Region[];
     categories: Category[];
+    /** Only the enabled fields; the server never mentions the disabled ones. */
+    fields: RequestFormField[];
 }
 
 type LoadState =
@@ -63,6 +78,21 @@ const emptyForm = {
 const inputClass =
     'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
 
+/** Labels for the core fields, wording and required marker both taken from the config. */
+function Label({ field, fallback }: { field?: RequestFormField; fallback: string }) {
+    return (
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+            {field?.label ?? fallback}
+            {(field?.required ?? false) && <span className="text-red-500"> *</span>}
+        </label>
+    );
+}
+
+function Hint({ field }: { field?: RequestFormField }) {
+    if (!field?.helpText) return null;
+    return <p className="text-xs text-gray-500 mt-1">{field.helpText}</p>;
+}
+
 export default function PublicRequestForm() {
     const { token = '' } = useParams<{ token: string }>();
     const [searchParams] = useSearchParams();
@@ -70,6 +100,7 @@ export default function PublicRequestForm() {
 
     const [load, setLoad] = useState<LoadState>({ status: 'loading' });
     const [formData, setFormData] = useState(emptyForm);
+    const [customValues, setCustomValues] = useState<Record<string, CustomFieldValue>>({});
     const [tags, setTags] = useState<string[]>([]);
     const [tagInput, setTagInput] = useState('');
     const [categorySearch, setCategorySearch] = useState('');
@@ -94,6 +125,12 @@ export default function PublicRequestForm() {
                 setLoad({ status: 'unavailable', reason: data?.reason === 'closed' ? 'closed' : 'not_found' });
                 return;
             }
+            // An older backend has no 'fields' key at all; the pre-config form is the
+            // right thing to show then, rather than a page with no inputs on it.
+            const fields: RequestFormField[] = Array.isArray(data.fields) && data.fields.length > 0
+                ? data.fields.map(parseField)
+                : FALLBACK_FIELDS;
+
             setLoad({
                 status: 'ready',
                 config: {
@@ -102,8 +139,17 @@ export default function PublicRequestForm() {
                     brands: data.brands ?? [],
                     regions: data.regions ?? [],
                     categories: data.categories ?? [],
+                    fields,
                 },
             });
+            setFormData((prev) => ({
+                ...prev,
+                ...Object.fromEntries(
+                    (['title', 'description', 'department', 'estimatedHours'] as const)
+                        .map((key) => [key, fields.find((f) => f.fieldKey === key)?.defaultValue ?? prev[key]]),
+                ),
+                priority: fields.find((f) => f.fieldKey === 'priority')?.defaultValue ?? 'normal',
+            }));
         })();
 
         return () => {
@@ -142,6 +188,22 @@ export default function PublicRequestForm() {
         return config.categories.filter((c) => c.name.toLowerCase().includes(query));
     }, [config, categorySearch]);
 
+    // The same three helpers the internal form uses, so both pages honour one config.
+    const core = useMemo(() => coreFields(config?.fields ?? FALLBACK_FIELDS), [config]);
+    const on = (key: keyof typeof core) => core[key]?.enabled ?? true;
+    const visibleCustomFields = useMemo(
+        () => customFieldsFor(config?.fields ?? [], formData.categoryId || null),
+        [config, formData.categoryId],
+    );
+
+    // Seed defaults for fields that just appeared, drop answers for ones that just left.
+    useEffect(() => {
+        setCustomValues((prev) => ({
+            ...defaultCustomValues(visibleCustomFields),
+            ...pruneCustomValues(prev, visibleCustomFields),
+        }));
+    }, [visibleCustomFields]);
+
     const setField = (name: keyof typeof emptyForm, value: string) =>
         setFormData((prev) => ({ ...prev, [name]: value }));
 
@@ -167,8 +229,13 @@ export default function PublicRequestForm() {
 
         // "required" cannot express "pick one of the suggestions", so the one field the
         // browser can't validate is checked here before anything is sent.
-        if (!formData.categoryId) {
-            setError('Please choose a work category from the list.');
+        if (on('category') && (core.category?.required ?? true) && !formData.categoryId) {
+            setError(`Please choose a ${(core.category?.label ?? 'work category').toLowerCase()} from the list.`);
+            return;
+        }
+        const missingCustom = firstMissingCustomField(visibleCustomFields, customValues);
+        if (missingCustom) {
+            setError(`${missingCustom} is required.`);
             return;
         }
 
@@ -178,7 +245,11 @@ export default function PublicRequestForm() {
         try {
             const { data, error: rpcError } = await supabase.rpc('submit_public_request', {
                 p_token: token,
-                p_payload: { ...formData, tags },
+                p_payload: {
+                    ...formData,
+                    tags: on('tags') ? tags : [],
+                    customFields: serializeCustomValues(visibleCustomFields, customValues),
+                },
             });
             if (rpcError) throw new Error(rpcError.message);
             if (!data?.ok) throw new Error('The request could not be submitted.');
@@ -210,7 +281,13 @@ export default function PublicRequestForm() {
     };
 
     const resetForAnother = () => {
-        setFormData({ ...emptyForm, requesterName: formData.requesterName, requesterEmail: formData.requesterEmail });
+        setFormData({
+            ...emptyForm,
+            priority: core.priority?.defaultValue ?? 'normal',
+            requesterName: formData.requesterName,
+            requesterEmail: formData.requesterEmail,
+        });
+        setCustomValues(defaultCustomValues(customFieldsFor(config?.fields ?? [], null)));
         setTags([]);
         setTagInput('');
         setCategorySearch('');
@@ -352,235 +429,264 @@ export default function PublicRequestForm() {
                         <h2 className="text-base font-semibold text-gray-900">Your request</h2>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Request title <span className="text-red-500">*</span>
-                            </label>
+                            <Label field={core.title} fallback="Request title" />
                             <input
                                 type="text"
                                 required
                                 value={formData.title}
                                 onChange={(e) => setField('title', e.target.value)}
                                 className={inputClass}
-                                placeholder="E.g., Social media campaign for product launch"
+                                placeholder={core.title?.placeholder ?? 'E.g., Social media campaign for product launch'}
                             />
+                            <Hint field={core.title} />
                         </div>
 
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Description <span className="text-red-500">*</span>
-                            </label>
-                            <textarea
-                                required
-                                rows={4}
-                                value={formData.description}
-                                onChange={(e) => setField('description', e.target.value)}
-                                className={inputClass}
-                                placeholder="Provide detailed information about what you need..."
-                            />
-                        </div>
+                        {on('description') && (
+                            <div>
+                                <Label field={core.description} fallback="Description" />
+                                <textarea
+                                    required={core.description?.required ?? true}
+                                    rows={4}
+                                    value={formData.description}
+                                    onChange={(e) => setField('description', e.target.value)}
+                                    className={inputClass}
+                                    placeholder={core.description?.placeholder ?? 'Provide detailed information about what you need...'}
+                                />
+                                <Hint field={core.description} />
+                            </div>
+                        )}
 
                         <div className="grid sm:grid-cols-2 gap-4">
-                            <div ref={categoryFieldRef} className="relative">
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Work category <span className="text-red-500">*</span>
-                                </label>
-                                <div className="relative">
-                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                            {on('category') && (
+                                <div ref={categoryFieldRef} className="relative">
+                                    <Label field={core.category} fallback="Work category" />
+                                    <div className="relative">
+                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                                        <input
+                                            type="text"
+                                            autoComplete="off"
+                                            value={categorySearch}
+                                            onChange={(e) => {
+                                                setCategorySearch(e.target.value);
+                                                setField('categoryId', '');
+                                                setShowCategoryList(true);
+                                            }}
+                                            onFocus={() => setShowCategoryList(true)}
+                                            className={`${inputClass} pl-9`}
+                                            placeholder={core.category?.placeholder ?? 'Search a category...'}
+                                        />
+                                    </div>
+                                    {showCategoryList && (
+                                        <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-56 overflow-y-auto">
+                                            {matchedCategories.length > 0 ? (
+                                                matchedCategories.map((category) => (
+                                                    <button
+                                                        type="button"
+                                                        key={category.id}
+                                                        onClick={() => {
+                                                            setField('categoryId', category.id);
+                                                            setCategorySearch(category.name);
+                                                            setShowCategoryList(false);
+                                                        }}
+                                                        className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 ${
+                                                            formData.categoryId === category.id
+                                                                ? 'bg-blue-50 text-blue-700'
+                                                                : 'text-gray-700'
+                                                        }`}
+                                                    >
+                                                        {category.name}
+                                                    </button>
+                                                ))
+                                            ) : (
+                                                <div className="px-3 py-2 text-sm text-gray-500">No matching categories</div>
+                                            )}
+                                        </div>
+                                    )}
+                                    <Hint field={core.category} />
+                                </div>
+                            )}
+
+                            {on('client') && (
+                                <div>
+                                    <Label field={core.client} fallback="Brand" />
+                                    <select
+                                        required={core.client?.required ?? true}
+                                        value={formData.clientId}
+                                        onChange={(e) => {
+                                            setField('clientId', e.target.value);
+                                            setField('department', '');
+                                        }}
+                                        className={inputClass}
+                                    >
+                                        <option value="">{core.client?.placeholder ?? 'Select a brand'}</option>
+                                        {config!.brands.map((brand) => (
+                                            <option key={brand.id} value={brand.id}>
+                                                {brand.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <Hint field={core.client} />
+                                </div>
+                            )}
+
+                            {on('region') && (
+                                <div>
+                                    <Label field={core.region} fallback="Region" />
+                                    <select
+                                        required={core.region?.required ?? true}
+                                        value={formData.regionId}
+                                        onChange={(e) => setField('regionId', e.target.value)}
+                                        className={inputClass}
+                                    >
+                                        <option value="">{core.region?.placeholder ?? 'Select a region'}</option>
+                                        {config!.regions.map((region) => (
+                                            <option key={region.id} value={region.id}>
+                                                {region.flag ? `${region.flag} ` : ''}
+                                                {region.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <Hint field={core.region} />
+                                </div>
+                            )}
+
+                            {on('department') && (
+                                <div>
+                                    <Label field={core.department} fallback="Department" />
                                     <input
                                         type="text"
-                                        autoComplete="off"
-                                        value={categorySearch}
-                                        onChange={(e) => {
-                                            setCategorySearch(e.target.value);
-                                            setField('categoryId', '');
-                                            setShowCategoryList(true);
-                                        }}
-                                        onFocus={() => setShowCategoryList(true)}
-                                        className={`${inputClass} pl-9`}
-                                        placeholder="Search a category..."
+                                        required={core.department?.required ?? true}
+                                        list="public-department-suggestions"
+                                        value={formData.department}
+                                        onChange={(e) => setField('department', e.target.value)}
+                                        className={inputClass}
+                                        placeholder={
+                                            !on('client') || formData.clientId
+                                                ? core.department?.placeholder ?? 'Enter or select department'
+                                                : 'Select a brand first'
+                                        }
                                     />
+                                    <datalist id="public-department-suggestions">
+                                        {departments.map((dept) => (
+                                            <option key={dept} value={dept} />
+                                        ))}
+                                    </datalist>
+                                    <Hint field={core.department} />
                                 </div>
-                                {showCategoryList && (
-                                    <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-56 overflow-y-auto">
-                                        {matchedCategories.length > 0 ? (
-                                            matchedCategories.map((category) => (
-                                                <button
-                                                    type="button"
-                                                    key={category.id}
-                                                    onClick={() => {
-                                                        setField('categoryId', category.id);
-                                                        setCategorySearch(category.name);
-                                                        setShowCategoryList(false);
-                                                    }}
-                                                    className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 ${
-                                                        formData.categoryId === category.id
-                                                            ? 'bg-blue-50 text-blue-700'
-                                                            : 'text-gray-700'
-                                                    }`}
-                                                >
-                                                    {category.name}
-                                                </button>
-                                            ))
-                                        ) : (
-                                            <div className="px-3 py-2 text-sm text-gray-500">No matching categories</div>
-                                        )}
+                            )}
+                        </div>
+                    </div>
+
+                    {(on('priority') || on('dueDate') || on('estimatedHours')) && (
+                        <div className="space-y-4 border-t border-gray-200 pt-6">
+                            <h2 className="text-base font-semibold text-gray-900">Priority and timeline</h2>
+                            <div className="grid sm:grid-cols-3 gap-4">
+                                {on('priority') && (
+                                    <div>
+                                        <Label field={core.priority} fallback="Priority" />
+                                        <select
+                                            required={core.priority?.required ?? true}
+                                            value={formData.priority}
+                                            onChange={(e) => setField('priority', e.target.value)}
+                                            className={inputClass}
+                                        >
+                                            <option value="low">Low</option>
+                                            <option value="normal">Normal</option>
+                                            <option value="high">High</option>
+                                            <option value="urgent">Urgent</option>
+                                        </select>
+                                        <Hint field={core.priority} />
+                                    </div>
+                                )}
+                                {on('dueDate') && (
+                                    <div>
+                                        <Label field={core.dueDate} fallback="Needed by" />
+                                        <input
+                                            type="date"
+                                            required={core.dueDate?.required ?? true}
+                                            value={formData.dueDate}
+                                            onChange={(e) => setField('dueDate', e.target.value)}
+                                            className={inputClass}
+                                        />
+                                        <Hint field={core.dueDate} />
+                                    </div>
+                                )}
+                                {on('estimatedHours') && (
+                                    <div>
+                                        <Label field={core.estimatedHours} fallback="Estimated hours" />
+                                        <input
+                                            type="number"
+                                            min="0.5"
+                                            step="0.5"
+                                            required={core.estimatedHours?.required ?? false}
+                                            value={formData.estimatedHours}
+                                            onChange={(e) => setField('estimatedHours', e.target.value)}
+                                            className={inputClass}
+                                            placeholder={core.estimatedHours?.placeholder ?? 'e.g. 5'}
+                                        />
+                                        <Hint field={core.estimatedHours} />
                                     </div>
                                 )}
                             </div>
+                        </div>
+                    )}
 
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Brand <span className="text-red-500">*</span>
-                                </label>
-                                <select
-                                    required
-                                    value={formData.clientId}
-                                    onChange={(e) => {
-                                        setField('clientId', e.target.value);
-                                        setField('department', '');
-                                    }}
-                                    className={inputClass}
-                                >
-                                    <option value="">Select a brand</option>
-                                    {config!.brands.map((brand) => (
-                                        <option key={brand.id} value={brand.id}>
-                                            {brand.name}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
+                    {(on('tags') || visibleCustomFields.length > 0) && (
+                        <div className="space-y-4 border-t border-gray-200 pt-6">
+                            <h2 className="text-base font-semibold text-gray-900">Additional details</h2>
+                            {on('tags') && (
+                                <div>
+                                    <Label field={core.tags} fallback="Tags" />
+                                    <div className="w-full px-2 py-1.5 border border-gray-300 rounded-lg bg-white focus-within:ring-2 focus-within:ring-blue-500 flex flex-wrap gap-2 items-center">
+                                        {tags.map((tag) => (
+                                            <span
+                                                key={tag}
+                                                className="flex items-center gap-1 px-2.5 py-1 bg-blue-100 text-blue-700 text-sm rounded-full"
+                                            >
+                                                {tag}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setTags((prev) => prev.filter((t) => t !== tag))}
+                                                    className="hover:bg-blue-200 rounded-full p-0.5 focus:outline-none"
+                                                >
+                                                    <X className="w-3 h-3" />
+                                                </button>
+                                            </span>
+                                        ))}
+                                        <input
+                                            type="text"
+                                            value={tagInput}
+                                            onChange={(e) => {
+                                                if (e.target.value.includes(',')) {
+                                                    setTagInput(e.target.value.replace(/,/g, ''));
+                                                    commitTag();
+                                                } else {
+                                                    setTagInput(e.target.value);
+                                                }
+                                            }}
+                                            onKeyDown={handleTagKeyDown}
+                                            onBlur={commitTag}
+                                            className="flex-1 min-w-[140px] bg-transparent focus:outline-none text-sm py-0.5"
+                                            placeholder={tags.length === 0 ? core.tags?.placeholder ?? 'campaign, social-media, q3-launch' : ''}
+                                        />
+                                    </div>
+                                    <Hint field={core.tags} />
+                                </div>
+                            )}
 
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Region <span className="text-red-500">*</span>
-                                </label>
-                                <select
-                                    required
-                                    value={formData.regionId}
-                                    onChange={(e) => setField('regionId', e.target.value)}
-                                    className={inputClass}
-                                >
-                                    <option value="">Select a region</option>
-                                    {config!.regions.map((region) => (
-                                        <option key={region.id} value={region.id}>
-                                            {region.flag ? `${region.flag} ` : ''}
-                                            {region.name}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Department <span className="text-red-500">*</span>
-                                </label>
-                                <input
-                                    type="text"
-                                    required
-                                    list="public-department-suggestions"
-                                    value={formData.department}
-                                    onChange={(e) => setField('department', e.target.value)}
-                                    className={inputClass}
-                                    placeholder={
-                                        formData.clientId ? 'Enter or select department' : 'Select a brand first'
+                            {visibleCustomFields.map((field) => (
+                                <CustomFieldInput
+                                    key={field.id}
+                                    field={field}
+                                    value={customValues[field.fieldKey]}
+                                    inputClassName={inputClass}
+                                    onChange={(value) =>
+                                        setCustomValues((prev) => ({ ...prev, [field.fieldKey]: value }))
                                     }
                                 />
-                                <datalist id="public-department-suggestions">
-                                    {departments.map((dept) => (
-                                        <option key={dept} value={dept} />
-                                    ))}
-                                </datalist>
-                            </div>
+                            ))}
                         </div>
-                    </div>
-
-                    <div className="space-y-4 border-t border-gray-200 pt-6">
-                        <h2 className="text-base font-semibold text-gray-900">Priority and timeline</h2>
-                        <div className="grid sm:grid-cols-3 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Priority <span className="text-red-500">*</span>
-                                </label>
-                                <select
-                                    required
-                                    value={formData.priority}
-                                    onChange={(e) => setField('priority', e.target.value)}
-                                    className={inputClass}
-                                >
-                                    <option value="low">Low</option>
-                                    <option value="normal">Normal</option>
-                                    <option value="high">High</option>
-                                    <option value="urgent">Urgent</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Needed by <span className="text-red-500">*</span>
-                                </label>
-                                <input
-                                    type="date"
-                                    required
-                                    value={formData.dueDate}
-                                    onChange={(e) => setField('dueDate', e.target.value)}
-                                    className={inputClass}
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Estimated hours
-                                </label>
-                                <input
-                                    type="number"
-                                    min="0.5"
-                                    step="0.5"
-                                    value={formData.estimatedHours}
-                                    onChange={(e) => setField('estimatedHours', e.target.value)}
-                                    className={inputClass}
-                                    placeholder="e.g. 5"
-                                />
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="space-y-4 border-t border-gray-200 pt-6">
-                        <h2 className="text-base font-semibold text-gray-900">Additional details</h2>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
-                            <div className="w-full px-2 py-1.5 border border-gray-300 rounded-lg bg-white focus-within:ring-2 focus-within:ring-blue-500 flex flex-wrap gap-2 items-center">
-                                {tags.map((tag) => (
-                                    <span
-                                        key={tag}
-                                        className="flex items-center gap-1 px-2.5 py-1 bg-blue-100 text-blue-700 text-sm rounded-full"
-                                    >
-                                        {tag}
-                                        <button
-                                            type="button"
-                                            onClick={() => setTags((prev) => prev.filter((t) => t !== tag))}
-                                            className="hover:bg-blue-200 rounded-full p-0.5 focus:outline-none"
-                                        >
-                                            <X className="w-3 h-3" />
-                                        </button>
-                                    </span>
-                                ))}
-                                <input
-                                    type="text"
-                                    value={tagInput}
-                                    onChange={(e) => {
-                                        if (e.target.value.includes(',')) {
-                                            setTagInput(e.target.value.replace(/,/g, ''));
-                                            commitTag();
-                                        } else {
-                                            setTagInput(e.target.value);
-                                        }
-                                    }}
-                                    onKeyDown={handleTagKeyDown}
-                                    onBlur={commitTag}
-                                    className="flex-1 min-w-[140px] bg-transparent focus:outline-none text-sm py-0.5"
-                                    placeholder={tags.length === 0 ? 'campaign, social-media, q3-launch' : ''}
-                                />
-                            </div>
-                        </div>
-                    </div>
+                    )}
 
                     <div className="flex items-center justify-between gap-3 border-t border-gray-200 pt-6">
                         <p className="text-xs text-gray-500">

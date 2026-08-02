@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { User } from '../types/types';
-import { X, Save, User as UserIcon, Award } from 'lucide-react';
+import { X, Save, User as UserIcon, Award, Building2, Globe } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
 import { SkillPicker } from './SkillPicker';
+import { PreferenceMultiSelect } from './PreferenceMultiSelect';
 
 interface Props {
     isOpen: boolean;
@@ -13,9 +14,11 @@ interface Props {
 
 export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
     const { updateProfile } = useAuth();
-    const { skills, refreshUsers } = useData();
+    const { skills, clients, regions, refreshUsers } = useData();
     const [name, setName] = useState(currentUser.name || '');
     const [skillIds, setSkillIds] = useState<string[]>(currentUser.skillIds || []);
+    const [clientIds, setClientIds] = useState<string[]>(currentUser.clientIds || []);
+    const [regionIds, setRegionIds] = useState<string[]>(currentUser.regionIds || []);
     const [isSaving, setIsSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -25,6 +28,8 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
             // does not linger (the modal stays mounted between openings).
             setName(currentUser.name || '');
             setSkillIds(currentUser.skillIds || []);
+            setClientIds(currentUser.clientIds || []);
+            setRegionIds(currentUser.regionIds || []);
             setError(null);
         }
     }, [isOpen, currentUser]);
@@ -40,7 +45,7 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
         setIsSaving(true);
         setError(null);
         try {
-            await updateProfile({ name: name.trim(), skillIds });
+            await updateProfile({ name: name.trim(), skillIds, clientIds, regionIds });
             // Team Management reads skills off the shared user list, so pull it forward too.
             await refreshUsers();
             onClose();
@@ -132,6 +137,52 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
                                 selectedIds={skillIds}
                                 onChange={setSkillIds}
                                 placeholder="Search skills across all teams..."
+                            />
+                        </div>
+
+                        <hr className="border-gray-200" />
+
+                        {/* Brands and regions -- what new work gets handed to them automatically */}
+                        <div className="space-y-3">
+                            <div>
+                                <h3 className="text-md font-semibold text-gray-900 flex items-center gap-2">
+                                    <Building2 className="w-5 h-5" />
+                                    Preferred brands
+                                </h3>
+                                <p className="mt-1 text-xs text-gray-500">
+                                    Work for these brands can be assigned to you automatically. Pick as many as you like.
+                                </p>
+                            </div>
+
+                            <PreferenceMultiSelect
+                                options={clients.map(c => ({ id: c.id, name: c.name }))}
+                                selectedIds={clientIds}
+                                onChange={setClientIds}
+                                emptyLabel="No brands have been set up yet."
+                                accent="blue"
+                                searchPlaceholder="Search brands..."
+                            />
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <h3 className="text-md font-semibold text-gray-900 flex items-center gap-2">
+                                    <Globe className="w-5 h-5" />
+                                    Preferred regions
+                                </h3>
+                                <p className="mt-1 text-xs text-gray-500">
+                                    The regions you want to cover. Leaving both of these empty means new work is only
+                                    ever assigned to you by hand.
+                                </p>
+                            </div>
+
+                            <PreferenceMultiSelect
+                                options={regions.map(r => ({ id: r.id, name: r.name, prefix: r.flag }))}
+                                selectedIds={regionIds}
+                                onChange={setRegionIds}
+                                emptyLabel="No regions have been set up yet."
+                                accent="teal"
+                                searchPlaceholder="Search regions..."
                             />
                         </div>
                     </div>

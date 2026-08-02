@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
-import { Check, Eye, EyeOff, Info, Loader2, Users } from 'lucide-react';
+import { Building2, Check, Eye, EyeOff, Globe, Info, Loader2, Users } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
-import { useAuth, saveUserSkills } from '../contexts/AuthContext';
+import { useAuth, saveUserSkills, saveUserClients, saveUserRegions } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
-import { Skill, Team } from '../types/types';
+import { Client, Region, Skill, Team } from '../types/types';
 import { Logo } from './Logo';
 import { SkillPicker } from './SkillPicker';
+import { PreferenceMultiSelect } from './PreferenceMultiSelect';
 
 const PageLoader = () => (
     <div className="flex items-center justify-center h-screen bg-gray-50">
@@ -68,8 +69,12 @@ export function Onboarding() {
 
     const [teams, setTeams] = useState<Team[]>([]);
     const [skills, setSkills] = useState<Skill[]>([]);
+    const [clients, setClients] = useState<Client[]>([]);
+    const [regions, setRegions] = useState<Region[]>([]);
     const [teamId, setTeamId] = useState<string>('');
     const [skillIds, setSkillIds] = useState<string[]>([]);
+    const [clientIds, setClientIds] = useState<string[]>([]);
+    const [regionIds, setRegionIds] = useState<string[]>([]);
 
     const [loadingOptions, setLoadingOptions] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -101,9 +106,18 @@ export function Onboarding() {
         let cancelled = false;
 
         (async () => {
-            const [{ data: teamsData }, { data: skillsData }, { data: membership }, hasPassword] = await Promise.all([
+            const [
+                { data: teamsData },
+                { data: skillsData },
+                { data: clientsData },
+                { data: regionsData },
+                { data: membership },
+                hasPassword
+            ] = await Promise.all([
                 supabase.from('teams').select('id, name, description, color').order('name'),
                 supabase.from('skills').select('id, name, category').order('name'),
+                supabase.from('clients').select('id, name').order('name'),
+                supabase.from('regions').select('id, name, code, flag').order('name'),
                 supabase.from('team_members').select('team_id').eq('user_id', session.user.id),
                 supabase.rpc('current_user_has_password')
             ]);
@@ -129,6 +143,8 @@ export function Onboarding() {
                 category: s.category || 'General',
                 teamIds: []
             })));
+            setClients((clientsData || []) as unknown as Client[]);
+            setRegions((regionsData || []) as unknown as Region[]);
             // Pre-select the team they were invited into. team_members only has a row if an
             // admin placed them after they already had a profile; a fresh invite instead
             // carries the team in user_metadata, since team_members.user_id cannot reference
@@ -140,6 +156,18 @@ export function Onboarding() {
             const invitedTeamId = profile?.onboardingCompleted ? null : session.user.user_metadata?.team_id;
             if (membership && membership.length > 0) setTeamId(membership[0].team_id);
             else if (invitedTeamId) setTeamId(invitedTeamId);
+
+            // Somebody re-picking a team already has skills and preferences. Start the pickers
+            // from them rather than empty, or saving would read as "I have none" and wipe the lot.
+            if (profile?.skillIds?.length) {
+                setSkillIds(prev => (prev.length ? prev : profile.skillIds));
+            }
+            if (profile?.clientIds?.length) {
+                setClientIds(prev => (prev.length ? prev : profile.clientIds));
+            }
+            if (profile?.regionIds?.length) {
+                setRegionIds(prev => (prev.length ? prev : profile.regionIds));
+            }
             setLoadingOptions(false);
         })();
 
@@ -217,6 +245,12 @@ export function Onboarding() {
                     if (memberError) throw memberError;
                 }
 
+                // Their skills and preferences came with them; these all diff, so anything they
+                // added or unticked here is applied and the rest is left alone.
+                await saveUserSkills(userId, skillIds);
+                await saveUserClients(userId, clientIds);
+                await saveUserRegions(userId, regionIds);
+
                 await refreshProfile();
                 await Promise.all([refreshUsers(), refreshTeams()]);
                 navigate('/', { replace: true });
@@ -268,6 +302,8 @@ export function Onboarding() {
             }
 
             await saveUserSkills(userId, skillIds);
+            await saveUserClients(userId, clientIds);
+            await saveUserRegions(userId, regionIds);
 
             await refreshProfile();
             await Promise.all([refreshUsers(), refreshTeams()]);
@@ -502,22 +538,59 @@ export function Onboarding() {
                                 )}
                             </div>
 
-                            {/* Skills are already theirs on a re-pick -- Preferences is where they change them */}
-                            {!teamOnly && (
-                                <div className="space-y-2">
-                                    <label className="block text-sm font-medium text-gray-700">Your Skills</label>
-                                    <p className="text-xs text-gray-500">
-                                        Pick everything you can work on. Skills are not limited to your team &mdash;
-                                        choose any of them, and you can change this later in Preferences.
-                                    </p>
-                                    <SkillPicker
-                                        allSkills={skills}
-                                        selectedIds={skillIds}
-                                        onChange={setSkillIds}
-                                        placeholder="Search skills across all teams..."
-                                    />
-                                </div>
-                            )}
+                            {/* On a re-pick this arrives already filled in with what they had */}
+                            <div className="space-y-2">
+                                <label className="block text-sm font-medium text-gray-700">Your Skills</label>
+                                <p className="text-xs text-gray-500">
+                                    {teamOnly
+                                        ? 'These are the skills you had before. Add anything new, remove anything that no longer applies.'
+                                        : 'Pick everything you can work on. Skills are not limited to your team \u2014 choose any of them, and you can change this later in Preferences.'}
+                                </p>
+                                <SkillPicker
+                                    allSkills={skills}
+                                    selectedIds={skillIds}
+                                    onChange={setSkillIds}
+                                    placeholder="Search skills across all teams..."
+                                />
+                            </div>
+
+                            {/* Skills say what they can do; these two say what they want handed to them */}
+                            <div className="space-y-2">
+                                <label className="block text-sm font-medium text-gray-700 flex items-center gap-2">
+                                    <Building2 className="w-4 h-4 text-gray-400" />
+                                    Preferred Brands
+                                </label>
+                                <p className="text-xs text-gray-500">
+                                    Work for these brands can come to you automatically. Pick as many as you like.
+                                </p>
+                                <PreferenceMultiSelect
+                                    options={clients.map(c => ({ id: c.id, name: c.name }))}
+                                    selectedIds={clientIds}
+                                    onChange={setClientIds}
+                                    emptyLabel="No brands have been set up yet. You can pick them later in Preferences."
+                                    accent="blue"
+                                    searchPlaceholder="Search brands..."
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="block text-sm font-medium text-gray-700 flex items-center gap-2">
+                                    <Globe className="w-4 h-4 text-gray-400" />
+                                    Preferred Regions
+                                </label>
+                                <p className="text-xs text-gray-500">
+                                    The regions you want to cover. Leave these empty and work will only reach you when
+                                    someone assigns it to you by hand. You can change all of this later in Preferences.
+                                </p>
+                                <PreferenceMultiSelect
+                                    options={regions.map(r => ({ id: r.id, name: r.name, prefix: r.flag }))}
+                                    selectedIds={regionIds}
+                                    onChange={setRegionIds}
+                                    emptyLabel="No regions have been set up yet. You can pick them later in Preferences."
+                                    accent="teal"
+                                    searchPlaceholder="Search regions..."
+                                />
+                            </div>
 
                             <div className="pt-2 flex justify-end">
                                 <button

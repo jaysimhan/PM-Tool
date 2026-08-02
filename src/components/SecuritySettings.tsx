@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, Info, Loader2, Shield, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { ArrowLeft, Eye, EyeOff, Info, Loader2, Shield, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { ActiveSessions } from './ActiveSessions';
 
 export function SecuritySettings() {
     const navigate = useNavigate();
@@ -187,7 +188,20 @@ export function SecuritySettings() {
     return (
         <div className="min-h-screen bg-gray-50 py-12 px-4 flex justify-center font-sans">
             <div className="max-w-xl w-full space-y-6">
-                <h1 className="text-2xl font-bold text-gray-900">Security Settings</h1>
+                <div className="flex items-center justify-between gap-4">
+                    <h1 className="text-2xl font-bold text-gray-900">Security Settings</h1>
+                    {/* Back to wherever they came from. This screen is also the landing page
+                        for a password-reset link, where there is no history to go back to --
+                        hence the fallback rather than a bare navigate(-1). */}
+                    <button
+                        type="button"
+                        onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
+                        className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 shadow-sm flex items-center gap-1.5"
+                    >
+                        <ArrowLeft className="w-4 h-4" />
+                        Cancel
+                    </button>
+                </div>
 
                 {/* Two-Factor Authentication */}
                 <div className="bg-white md:p-8 md:rounded-xl md:shadow-sm md:border md:border-gray-200">
@@ -416,6 +430,8 @@ export function SecuritySettings() {
                         </div>
                     </form>
                 </div>
+
+                <ActiveSessions />
             </div>
         </div>
     );

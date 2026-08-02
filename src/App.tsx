@@ -78,7 +78,26 @@ export default function App() {
             <Routes>
                 {/* Public / Unauthenticated Routes */}
                 <Route path="/login" element={(!session || mfaRequired) ? <Login /> : <Navigate to="/" />} />
-                <Route path="/update-password" element={session ? <SecuritySettings /> : <Navigate to="/login" />} />
+                <Route path="/security-settings" element={session ? <SecuritySettings /> : <Navigate to="/login" />} />
+                {/* The old path. Password-recovery emails and bookmarks still point at it,
+                    and a rename that breaks the reset flow is not a rename worth having. */}
+                <Route
+                    path="/update-password"
+                    element={
+                        <Navigate
+                            replace
+                            to={{
+                                pathname: '/security-settings',
+                                // A recovery link arrives as /update-password#access_token=...
+                                // supabase-js normally consumes that hash before this renders,
+                                // but carrying it across costs nothing and losing it would end
+                                // the reset in silence.
+                                search: window.location.search,
+                                hash: window.location.hash,
+                            }}
+                        />
+                    }
+                />
                 {/* Invite landing: authenticated but not yet a member of the org. Onboarding
                     guards on the session itself so a slow session restore doesn't bounce it. */}
                 <Route path="/welcome" element={<Onboarding />} />
