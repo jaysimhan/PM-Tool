@@ -106,6 +106,11 @@ export default function TeamManagement({ currentUser }: Props) {
     const [showInviteDropdown, setShowInviteDropdown] = useState(false);
     const [inviteRole, setInviteRole] = useState('Editor');
     const [unassignedSearch, setUnassignedSearch] = useState('');
+    // Invites nobody has claimed yet. Separate search and separate list from the teamless
+    // members below: the two look alike and mean opposite things.
+    const [pendingSearch, setPendingSearch] = useState('');
+    const [setupLinks, setSetupLinks] = useState<Record<string, string>>({});
+    const [busySetupUserId, setBusySetupUserId] = useState<string | null>(null);
     // Pending "let me in" requests from the login screen. Admins only -- RLS says the same,
     // so a non-admin asking for them gets an empty list rather than a hidden one.
     const [accessRequests, setAccessRequests] = useState<AccessRequest[]>([]);
@@ -341,13 +346,45 @@ export default function TeamManagement({ currentUser }: Props) {
             setBusyRequestId(null);
         }
     };
+    // Two lists, because "invited, hasn't set up an account" and "has an account, no team" are
+    // different problems with different answers -- re-send the link, or put them on a team.
+    // Un-onboarded people are excluded from the teamless list rather than appearing in both.
     const unassignedUsers = useMemo(() => {
         if (!canSeeUnassigned) return [];
         return users
-            .filter(u => u.teamIds.length === 0 && u.role !== 'super_admin' && !u.deletedAt)
+            .filter(u => u.onboardingCompleted && u.teamIds.length === 0 && u.role !== 'super_admin' && !u.deletedAt)
             .filter(u => matchesQuery(u, unassignedSearch))
             .sort((a, b) => a.name.localeCompare(b.name));
     }, [users, canSeeUnassigned, unassignedSearch]);
+
+    const pendingSetupUsers = useMemo(() => {
+        if (!canSeeUnassigned) return [];
+        return users
+            .filter(u => !u.onboardingCompleted && !u.deletedAt)
+            .filter(u => matchesQuery(u, pendingSearch))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }, [users, canSeeUnassigned, pendingSearch]);
+
+    /** Their auth identity exists, so a second invite is refused as a duplicate; a magic link
+     *  puts them back on step 1, which is the only thing they still owe. */
+    const resendSetup = async (user: User) => {
+        setBusySetupUserId(user.id);
+        try {
+            const result = await sendSetupLink({ email: user.email });
+            if (result.actionLink) {
+                // Supabase only sends the mail itself once custom SMTP is configured; until then
+                // the function mints the same link for the admin to pass on by hand.
+                setSetupLinks(prev => ({ ...prev, [user.id]: result.actionLink! }));
+                toast.success(`Setup link created for ${user.email}. Copy it below and send it on.`);
+            } else {
+                toast.success(`Setup link sent to ${user.email}.`);
+            }
+        } catch (err) {
+            toast.error(`Could not send a setup link to ${user.email}: ${err instanceof Error ? err.message : 'unknown error'}`);
+        } finally {
+            setBusySetupUserId(null);
+        }
+    };
 
     const setUserActive = async (user: User, isActive: boolean) => {
         const { error } = await supabase.rpc('set_user_active', {
@@ -412,6 +449,13 @@ export default function TeamManagement({ currentUser }: Props) {
     const updateMemberRole = async (userId: string, role: string) => {
         if (!role) return false;
         const member = users.find(u => u.id === userId);
+        // An invite nobody has claimed is not a person with a job yet. They hold 'requester'
+        // until they set up an account, and set_user_role refuses this too -- for the super
+        // admin as much as for anyone -- so this is the readable version of that refusal.
+        if (member && !member.onboardingCompleted) {
+            toast.error(`${member.name} has not set up their account yet, so they stay a requester until they do.`);
+            return false;
+        }
         if (member?.role === 'super_admin') {
             toast.error("The super admin's role can only change through Transfer Ownership.");
             return false;
@@ -1205,8 +1249,9 @@ export default function TeamManagement({ currentUser }: Props) {
                         </h2>
                     </div>
                     <p className="text-sm text-gray-600 mb-4">
-                        Inviting somebody sends them account setup. They pick their own team on the way in, and
-                        stay a requester until they do.
+                        Inviting somebody sends them account setup: a name and a password. Finishing that puts
+                        them on the default team as a member. Until they finish, they are a requester and their
+                        role cannot be changed.
                     </p>
 
                     <div className="space-y-3">
@@ -1308,6 +1353,111 @@ export default function TeamManagement({ currentUser }: Props) {
                 </div>
             )}
 
+            {/* Requesters -- invited, but nobody has claimed the invite yet. Admins only, and
+                deliberately its own section: they are not members, they hold no real role, and
+                the only useful thing to do with them is get the setup link back in front of
+                them. Hidden entirely when there are none, since an empty list here is the
+                normal state of a healthy org. */}
+            {canSeeUnassigned && pendingSetupUsers.length > 0 && (
+                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                    <div className="flex items-center justify-between gap-4 mb-1">
+                        <h2 className="text-lg font-semibold text-gray-900">
+                            Requesters
+                            <span className="ml-2 text-sm font-normal text-gray-500">({pendingSetupUsers.length})</span>
+                        </h2>
+                        <input
+                            type="text"
+                            value={pendingSearch}
+                            onChange={(e) => setPendingSearch(e.target.value)}
+                            placeholder="Search name or email..."
+                            className="w-56 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none"
+                        />
+                    </div>
+                    <p className="text-sm text-gray-600 mb-4">
+                        Invited, but they have not set up an account yet. They stay requesters until they do
+                        &mdash; their role cannot be changed, by anyone &mdash; and they join the default team the
+                        moment they finish. Only admins see this list.
+                    </p>
+
+                    {pendingSetupUsers.length === 0 ? (
+                        <div className="text-sm text-gray-500 py-6 text-center border border-dashed border-gray-200 rounded-lg">
+                            Nobody matches that search.
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            {pendingSetupUsers.map(u => {
+                                const link = setupLinks[u.id];
+                                const busy = busySetupUserId === u.id;
+                                return (
+                                    <div key={u.id} className="border border-gray-200 rounded-lg p-4">
+                                        <div className="flex items-center justify-between gap-4">
+                                            <div className="flex items-center gap-3 min-w-0">
+                                                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-amber-100 text-amber-700 text-sm font-medium shrink-0">
+                                                    {u.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <h3 className="text-sm font-medium text-gray-900 truncate">{u.name}</h3>
+                                                        <span className="px-2 py-0.5 bg-amber-50 text-amber-700 text-xs rounded">
+                                                            Setup not finished
+                                                        </span>
+                                                        {!u.isActive && (
+                                                            <span className="px-2 py-0.5 bg-red-50 text-red-700 text-xs rounded">
+                                                                Deactivated
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500 truncate">{u.email}</div>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                <button
+                                                    onClick={() => resendSetup(u)}
+                                                    disabled={busy}
+                                                    className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+                                                >
+                                                    {busy ? 'Sending...' : 'Re-send setup link'}
+                                                </button>
+                                                {canDeleteAccount(u) && (
+                                                    <button
+                                                        onClick={() => handleDeleteUser(u)}
+                                                        className="px-3 py-1.5 border border-red-300 text-red-700 rounded-lg text-sm hover:bg-red-50 flex items-center gap-2"
+                                                    >
+                                                        <Trash2 className="w-4 h-4" />
+                                                        Delete
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {link && (
+                                            <div className="mt-3 flex items-center gap-2">
+                                                <input
+                                                    readOnly
+                                                    value={link}
+                                                    onFocus={(e) => e.currentTarget.select()}
+                                                    className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-600 bg-gray-50"
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        navigator.clipboard.writeText(link);
+                                                        toast.success('Setup link copied.');
+                                                    }}
+                                                    className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
+                                                >
+                                                    Copy
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            )}
+
             {/* Members without a team -- invisible everywhere else, since every other list
                 is scoped to a team. Admins only. */}
             {canSeeUnassigned && (
@@ -1328,8 +1478,9 @@ export default function TeamManagement({ currentUser }: Props) {
                         )}
                     </div>
                     <p className="text-sm text-gray-600 mb-4">
-                        Nobody here can use the app until they are on a team &mdash; they are asked to pick one
-                        the next time they log in. Add them to a team from Edit Team, or deactivate them.
+                        These are members of the organisation who are not on any team &mdash; usually because
+                        somebody took them off one. They can still use the app; they just will not appear in any
+                        team's workload. Add them to a team from Edit Team, or deactivate them.
                     </p>
 
                     {unassignedUsers.length === 0 ? (
@@ -1352,11 +1503,9 @@ export default function TeamManagement({ currentUser }: Props) {
                                                 <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded capitalize">
                                                     {u.role.replace('_', ' ')}
                                                 </span>
-                                                {!u.onboardingCompleted && (
-                                                    <span className="px-2 py-0.5 bg-amber-50 text-amber-700 text-xs rounded">
-                                                        Invite pending
-                                                    </span>
-                                                )}
+                                                {/* No "invite pending" badge: anyone whose setup is
+                                                    unfinished is in the Requesters list above, not
+                                                    this one. */}
                                                 {!u.isActive && (
                                                     <span className="px-2 py-0.5 bg-red-50 text-red-700 text-xs rounded">
                                                         Deactivated
@@ -1823,9 +1972,13 @@ export default function TeamManagement({ currentUser }: Props) {
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
                             >
                                 <option value="">Select a person</option>
-                                {users.filter(u => u.id !== currentUser.id).map(u => (
-                                    <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
-                                ))}
+                                {/* Unclaimed invites are left out: they hold no role until they
+                                    set up an account, and the function refuses them anyway. */}
+                                {users
+                                    .filter(u => u.id !== currentUser.id && u.onboardingCompleted && u.isActive && !u.deletedAt)
+                                    .map(u => (
+                                        <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                                    ))}
                             </select>
                         </div>
                         <div className="flex justify-end gap-2">

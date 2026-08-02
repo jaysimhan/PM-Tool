@@ -131,12 +131,16 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
         setIsMac(navigator.platform.toUpperCase().indexOf('MAC') >= 0);
     }, []);
 
+    // Nothing here is gated on having a team. Somebody an admin has not placed yet is a member
+    // without a team, not a member on hold: setup puts everyone on the default team, and an admin
+    // taking them off one is not meant to take the app away with it. There is no team picker to
+    // send them to any more -- see ProtectedRoute.
     const getNavigationItems = () => {
         const items = [];
 
-        if (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager') {
-            items.push({ id: 'dashboard', label: 'Dashboard', icon: DashboardIcon });
-        }
+        // Read-only org-wide numbers, with nothing on it that belongs to one person or one
+        // team, so it is not gated on either.
+        items.push({ id: 'dashboard', label: 'Dashboard', icon: DashboardIcon });
 
         items.push({ id: 'workload', label: 'Workload', icon: Users });
         items.push({ id: 'tasks', label: 'Tasks', icon: Calendar });

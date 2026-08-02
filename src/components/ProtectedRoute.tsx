@@ -12,7 +12,7 @@ const PageLoader = () => (
 
 export function ProtectedRoute() {
     const { session, profile: currentUser, loading: authLoading, mfaRequired, signOut } = useAuth();
-    const { teams, loading: dataLoading } = useData();
+    const { loading: dataLoading } = useData();
     const [showReactivation, setShowReactivation] = useState(false);
 
     if (authLoading || (session && dataLoading)) {
@@ -67,12 +67,13 @@ export function ProtectedRoute() {
         return <Navigate to="/welcome" replace />;
     }
 
-    // Someone an admin has taken off their team picks a new one before going any further.
-    // Gated on teams existing at all, otherwise an org with no teams yet would bounce
-    // everyone to a picker with nothing in it and no way back.
-    if (teams.length > 0 && currentUser.teamIds.length === 0) {
-        return <Navigate to="/welcome" replace />;
-    }
+    // Belonging to no team is not a reason to stop anybody. Step 1 of setup puts everyone on the
+    // default team, and an admin may later move them or take them off one entirely -- which makes
+    // them a member without a team, not a member on hold. They keep working; Team Management
+    // lists them under "Members without a team" so an admin can place them.
+    //
+    // This used to redirect them to /welcome to pick a team, which is why teamlessness needed a
+    // dashboard exception to not be a dead end. There is no picker to send them to now.
 
     return <Outlet context={{ currentUser }} />;
 }

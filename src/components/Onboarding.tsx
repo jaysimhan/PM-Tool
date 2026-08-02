@@ -37,22 +37,28 @@ const getStrengthDetails = (score: number) => {
     }
 };
 
+/** Supabase refuses a password identical to the current one. Here that is not a failure. */
+const isSamePasswordError = (err: any) =>
+    err?.code === 'same_password' || /different from the old password/i.test(err?.message || '');
+
 /**
- * Account setup for someone arriving from an invite link. The invite already
- * authenticated them, so this is not a sign-up -- it is the two things the invite
- * cannot know: a password of their own, then their team and skills.
+ * Account setup for someone arriving from an invite link. The invite already authenticated
+ * them, so this is not a sign-up -- it is the one thing the invite cannot know: a password
+ * of their own.
  *
- * Their public.users row already exists: the on_auth_user_created trigger writes it when
- * the invite is issued. So "has a profile" cannot mean "is set up" -- users.onboarding_completed
- * is what says so, and setting it is the last thing this screen does.
+ * Step 1 -- name and password -- is the account. Finishing it is what turns an unclaimed
+ * invite into a person: complete_onboarding_step_one() sets onboarding_completed, promotes
+ * them out of 'requester', and puts them on the default team in one transaction. Until it is
+ * done they are a requester and nothing, including a super admin, can move them.
  *
- * Dropping off part-way is expected, so arriving here resumes rather than restarts:
- *   - set up and on a team    -> nothing to do, straight to the app
- *   - no password yet         -> step 1, as if for the first time
- *   - password but no profile -> step 2, with step 1 already ticked
- *   - set up but no team      -> step 2 alone (an admin took them off their team)
- * The password is the thing that says step 1 is done, and only the database can see it,
- * hence current_user_has_password().
+ * Step 2 -- team, skills, brands, regions -- is preferences, and preferences live in the app
+ * already, so it is skippable and walking away from it costs nothing: they land on the
+ * dashboard next time, on the default team, and can fill the rest in from Preferences.
+ *
+ * Which means this screen is only ever for one thing, and it says so:
+ *   - step 1 not done -> step 1, however many times it takes
+ *   - step 1 done     -> nothing to do here; back to the login route, which lands an
+ *                        already-signed-in person on their dashboard
  */
 export function Onboarding() {
     const { session, profile, loading: authLoading, refreshProfile, signOut } = useAuth();
@@ -72,6 +78,7 @@ export function Onboarding() {
     const [clients, setClients] = useState<Client[]>([]);
     const [regions, setRegions] = useState<Region[]>([]);
     const [teamId, setTeamId] = useState<string>('');
+    const [joinedTeamId, setJoinedTeamId] = useState<string>('');
     const [skillIds, setSkillIds] = useState<string[]>([]);
     const [clientIds, setClientIds] = useState<string[]>([]);
     const [regionIds, setRegionIds] = useState<string[]>([]);
@@ -80,10 +87,16 @@ export function Onboarding() {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    // null while we are still asking. Rendering a step before the answer is in would flash
-    // the password form at someone who already has one.
-    const [arrivedWithPassword, setArrivedWithPassword] = useState<boolean | null>(null);
+    // They already have a password -- they used the reset link instead of the invite, or set one
+    // and closed the tab before this call finished. Step 1 still has to be completed; this only
+    // changes what the screen says about it. Resolved once, because setting a password fires an
+    // auth update that re-runs the effect below.
+    const [arrivedWithPassword, setArrivedWithPassword] = useState(false);
     const resumeResolved = useRef(false);
+
+    // Step 1 finished in this visit. Without it, the onboarding_completed the RPC just wrote
+    // would send them straight out of step 2 through the guard below.
+    const completedStepOneHere = useRef(false);
 
     const email = session?.user?.email || '';
     const strengthScore = useMemo(() => calculateStrength(newPassword), [newPassword]);
@@ -123,16 +136,9 @@ export function Onboarding() {
             ]);
             if (cancelled) return;
 
-            // Resolved once, on the way in. Setting a password fires an auth update that
-            // re-runs this effect, and by then a password of course exists -- re-reading it
-            // would relabel a first-time setup as a resume.
             if (!resumeResolved.current) {
                 resumeResolved.current = true;
-                const resuming = hasPassword.data === true;
-                setArrivedWithPassword(resuming);
-                if (resuming) setStep(2);
-                // Treat an unavailable check as "no password" rather than blocking setup: the
-                // worst case is the old behaviour, a trip back through step 1.
+                setArrivedWithPassword(hasPassword.data === true);
                 if (hasPassword.error) console.error('Could not check password state:', hasPassword.error);
             }
 
@@ -145,20 +151,16 @@ export function Onboarding() {
             })));
             setClients((clientsData || []) as unknown as Client[]);
             setRegions((regionsData || []) as unknown as Region[]);
-            // Pre-select the team they were invited into. team_members only has a row if an
-            // admin placed them after they already had a profile; a fresh invite instead
-            // carries the team in user_metadata, since team_members.user_id cannot reference
-            // them until the profile row below exists.
-            //
-            // Someone re-picking after being removed gets no pre-selection at all: the invite
-            // metadata still names the team they were just taken off, and defaulting them
-            // straight back into it would undo the removal on the first click.
-            const invitedTeamId = profile?.onboardingCompleted ? null : session.user.user_metadata?.team_id;
-            if (membership && membership.length > 0) setTeamId(membership[0].team_id);
-            else if (invitedTeamId) setTeamId(invitedTeamId);
 
-            // Somebody re-picking a team already has skills and preferences. Start the pickers
-            // from them rather than empty, or saving would read as "I have none" and wipe the lot.
+            // Whatever team they are actually on wins. On the way into step 1 that is usually
+            // nothing; step 1 puts them on the default team and hands the id back.
+            if (membership && membership.length > 0) {
+                setJoinedTeamId(membership[0].team_id);
+                setTeamId(prev => prev || membership[0].team_id);
+            }
+
+            // Somebody who set a password by another route may already have preferences. Start
+            // the pickers from them rather than empty, or saving would read as "I have none".
             if (profile?.skillIds?.length) {
                 setSkillIds(prev => (prev.length ? prev : profile.skillIds));
             }
@@ -176,15 +178,11 @@ export function Onboarding() {
 
     if (authLoading) return <PageLoader />;
     if (!session) return <Navigate to="/login" replace />;
-    // Already set up and on a team -- nothing to do here.
-    if (profile?.onboardingCompleted && profile.teamIds.length > 0) return <Navigate to="/" replace />;
-    // Still working out how far they got last time.
-    if (arrivedWithPassword === null) return <PageLoader />;
-
-    // Someone an admin has taken off their team lands here too, but they already have a
-    // password and skills of their own -- all they owe us is a new team.
-    const teamOnly = profile?.onboardingCompleted === true;
-    const activeStep = teamOnly ? 2 : step;
+    // Step 1 is already behind them, so there is nothing on this screen for them -- a second
+    // click on an invite or setup link included. /login sends a live session to the dashboard.
+    if (profile?.onboardingCompleted && !completedStepOneHere.current) {
+        return <Navigate to="/login" replace />;
+    }
 
     const handleCreatePassword = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -208,7 +206,29 @@ export function Onboarding() {
                 password: newPassword,
                 data: { name: name.trim() }
             });
-            if (updateError) throw updateError;
+            // Typing the password they already have is not a mistake worth stopping for: the
+            // point of this step is that a password exists, and one does.
+            if (updateError && !isSamePasswordError(updateError)) throw updateError;
+
+            // One call for the rest of it: the name, onboarding_completed, the promotion out of
+            // 'requester', and the default team. An invite that named a team keeps it.
+            const { data: result, error: rpcError } = await supabase.rpc('complete_onboarding_step_one', {
+                p_name: name.trim(),
+                p_team_id: session?.user?.user_metadata?.team_id ?? null
+            });
+            if (rpcError) throw rpcError;
+
+            completedStepOneHere.current = true;
+
+            const landedOn = (result as any)?.team_id as string | undefined;
+            if (landedOn) {
+                setJoinedTeamId(landedOn);
+                setTeamId(prev => prev || landedOn);
+            }
+
+            // Their role and team just changed, so the app's copies of both are stale.
+            await refreshProfile();
+            await Promise.all([refreshUsers(), refreshTeams()]);
             setStep(2);
         } catch (err: any) {
             setError(err.message || 'Could not set your password.');
@@ -217,78 +237,20 @@ export function Onboarding() {
         }
     };
 
+    /** Step 2 is optional, so leaving it is a first-class way out rather than an escape hatch. */
+    const skipRest = () => navigate('/', { replace: true });
+
     const handleFinish = async () => {
         if (!session?.user) return;
-        if (teams.length > 0 && !teamId) {
-            setError('Please select your team.');
-            return;
-        }
 
         setSaving(true);
         setError(null);
         const userId = session.user.id;
 
         try {
-            // Someone re-picking a team keeps the name, role and skills they already have;
-            // only their membership changes.
-            if (teamOnly) {
-                if (teamId) {
-                    const { error: deleteError } = await supabase
-                        .from('team_members')
-                        .delete()
-                        .eq('user_id', userId);
-                    if (deleteError) throw deleteError;
-
-                    const { error: memberError } = await supabase
-                        .from('team_members')
-                        .insert({ team_id: teamId, user_id: userId });
-                    if (memberError) throw memberError;
-                }
-
-                // Their skills and preferences came with them; these all diff, so anything they
-                // added or unticked here is applied and the rest is left alone.
-                await saveUserSkills(userId, skillIds);
-                await saveUserClients(userId, clientIds);
-                await saveUserRegions(userId, regionIds);
-
-                await refreshProfile();
-                await Promise.all([refreshUsers(), refreshTeams()]);
-                navigate('/', { replace: true });
-                return;
-            }
-
-            // Never re-insert over an existing profile: that would reset the role of
-            // someone who landed here because of a transient profile-load failure.
-            const { data: existing, error: readError } = await supabase
-                .from('users')
-                .select('id')
-                .eq('id', userId)
-                .maybeSingle();
-            if (readError) throw readError;
-
-            if (existing) {
-                const { error: updateError } = await supabase
-                    .from('users')
-                    .update({ name: name.trim(), onboarding_completed: true })
-                    .eq('id', userId);
-                if (updateError) throw updateError;
-            } else {
-                const { error: insertError } = await supabase
-                    .from('users')
-                    .insert({
-                        id: userId,
-                        name: name.trim(),
-                        email,
-                        role: 'team_member',
-                        daily_capacity: 8,
-                        is_active: true,
-                        onboarding_completed: true
-                    });
-                if (insertError) throw insertError;
-            }
-
-            if (teamId) {
-                // A person belongs to one team, so replace rather than add.
+            // A person belongs to one team, so a change is a replacement. Unchanged means no
+            // write at all -- deleting and re-inserting the same row buys nothing.
+            if (teamId && teamId !== joinedTeamId) {
                 const { error: deleteError } = await supabase
                     .from('team_members')
                     .delete()
@@ -301,6 +263,8 @@ export function Onboarding() {
                 if (memberError) throw memberError;
             }
 
+            // These all diff, so anything ticked or unticked here is applied and the rest is
+            // left alone.
             await saveUserSkills(userId, skillIds);
             await saveUserClients(userId, clientIds);
             await saveUserRegions(userId, regionIds);
@@ -309,7 +273,7 @@ export function Onboarding() {
             await Promise.all([refreshUsers(), refreshTeams()]);
             navigate('/', { replace: true });
         } catch (err: any) {
-            setError(err.message || 'Could not finish setting up your account.');
+            setError(err.message || 'Could not save your preferences.');
         } finally {
             setSaving(false);
         }
@@ -320,6 +284,8 @@ export function Onboarding() {
         { number: 2, label: 'Team & skills' }
     ];
 
+    const joinedTeamName = teams.find(t => t.id === joinedTeamId)?.name;
+
     return (
         <div className="min-h-screen bg-gray-50 py-12 px-4 flex justify-center font-sans">
             <div className="max-w-lg w-full h-fit">
@@ -329,41 +295,42 @@ export function Onboarding() {
 
                 <div className="bg-white p-6 md:p-8 rounded-xl shadow-sm border border-gray-200">
                     <h1 className="text-xl font-bold text-gray-900">
-                        {teamOnly ? 'Choose your team' : 'Set up your account'}
+                        {step === 1 ? 'Set up your account' : "You're in"}
                     </h1>
                     <p className="text-sm text-gray-500 mt-1">
-                        {teamOnly
-                            ? "You're not on a team right now. Pick the one you're working with to carry on."
-                            : arrivedWithPassword
-                                ? 'Your password is already set. Pick your team and skills to finish.'
-                                : "You've been invited to CareStack Marketing Workflow. Two quick steps and you're in."}
+                        {step === 1
+                            ? arrivedWithPassword
+                                ? 'Confirm your name and password to finish creating your account. If you have already chosen a password, enter it again here.'
+                                : "You've been invited to CareStack Marketing Workflow. One quick step and you're in."
+                            : joinedTeamName
+                                ? `Your account is ready and you've been added to ${joinedTeamName}. The rest is optional — change your team or tell us what you work on, or skip it and do it later from Preferences.`
+                                : 'Your account is ready. The rest is optional — tell us what you work on, or skip it and do it later from Preferences.'}
                     </p>
 
-                    {/* Stepper -- a team re-pick is a single step, so there is nothing to track */}
-                    {!teamOnly && (
-                        <div className="flex items-center gap-3 my-6">
-                            {steps.map((s, index) => (
-                                <React.Fragment key={s.number}>
-                                    <div className="flex items-center gap-2">
-                                        <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${
-                                            activeStep > s.number
-                                                ? 'bg-green-500 text-white'
-                                                : activeStep === s.number
-                                                    ? 'bg-blue-600 text-white'
-                                                    : 'bg-gray-200 text-gray-500'
-                                        }`}>
-                                            {activeStep > s.number ? <Check className="w-4 h-4" /> : s.number}
-                                        </div>
-                                        <span className={`text-sm font-medium ${activeStep >= s.number ? 'text-gray-900' : 'text-gray-400'}`}>
-                                            {s.label}
-                                        </span>
+                    <div className="flex items-center gap-3 my-6">
+                        {steps.map((s, index) => (
+                            <React.Fragment key={s.number}>
+                                <div className="flex items-center gap-2">
+                                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${
+                                        step > s.number
+                                            ? 'bg-green-500 text-white'
+                                            : step === s.number
+                                                ? 'bg-blue-600 text-white'
+                                                : 'bg-gray-200 text-gray-500'
+                                    }`}>
+                                        {step > s.number ? <Check className="w-4 h-4" /> : s.number}
                                     </div>
-                                    {index < steps.length - 1 && <div className="flex-1 h-px bg-gray-200" />}
-                                </React.Fragment>
-                            ))}
-                        </div>
-                    )}
-                    {teamOnly && <div className="my-6" />}
+                                    <span className={`text-sm font-medium ${step >= s.number ? 'text-gray-900' : 'text-gray-400'}`}>
+                                        {s.label}
+                                    </span>
+                                    {s.number === 2 && (
+                                        <span className="text-xs text-gray-400">(optional)</span>
+                                    )}
+                                </div>
+                                {index < steps.length - 1 && <div className="flex-1 h-px bg-gray-200" />}
+                            </React.Fragment>
+                        ))}
+                    </div>
 
                     {error && (
                         <div className="mb-4 bg-red-50 text-red-700 px-4 py-3 rounded-lg text-sm border border-red-100">
@@ -371,7 +338,7 @@ export function Onboarding() {
                         </div>
                     )}
 
-                    {activeStep === 1 ? (
+                    {step === 1 ? (
                         <form onSubmit={handleCreatePassword} className="space-y-5">
                             <div className="space-y-1">
                                 <label className="block text-sm font-medium text-gray-700">Email</label>
@@ -498,8 +465,13 @@ export function Onboarding() {
                             <div className="space-y-2">
                                 <label className="block text-sm font-medium text-gray-700 flex items-center gap-2">
                                     <Users className="w-4 h-4 text-gray-400" />
-                                    Your Team {teams.length > 0 && <span className="text-gray-500">*</span>}
+                                    Your Team
                                 </label>
+                                <p className="text-xs text-gray-500">
+                                    {joinedTeamName
+                                        ? `You're on ${joinedTeamName}. Pick a different one if that isn't where you work — an admin can move you later either way.`
+                                        : 'Pick the team you work with. An admin can move you later either way.'}
+                                </p>
                                 {loadingOptions ? (
                                     <div className="text-sm text-gray-500 py-3">Loading teams...</div>
                                 ) : teams.length === 0 ? (
@@ -538,13 +510,11 @@ export function Onboarding() {
                                 )}
                             </div>
 
-                            {/* On a re-pick this arrives already filled in with what they had */}
                             <div className="space-y-2">
                                 <label className="block text-sm font-medium text-gray-700">Your Skills</label>
                                 <p className="text-xs text-gray-500">
-                                    {teamOnly
-                                        ? 'These are the skills you had before. Add anything new, remove anything that no longer applies.'
-                                        : 'Pick everything you can work on. Skills are not limited to your team \u2014 choose any of them, and you can change this later in Preferences.'}
+                                    Pick everything you can work on. Skills are not limited to your team &mdash; choose any
+                                    of them, and you can change this later in Preferences.
                                 </p>
                                 <SkillPicker
                                     allSkills={skills}
@@ -592,33 +562,43 @@ export function Onboarding() {
                                 />
                             </div>
 
-                            <div className="pt-2 flex justify-end">
+                            <div className="pt-2 flex items-center justify-end gap-2">
+                                <button
+                                    type="button"
+                                    onClick={skipRest}
+                                    disabled={saving}
+                                    className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium text-sm disabled:opacity-50"
+                                >
+                                    Skip for now
+                                </button>
                                 <button
                                     type="button"
                                     onClick={handleFinish}
-                                    disabled={saving || loadingOptions || (teams.length > 0 && !teamId)}
+                                    disabled={saving || loadingOptions}
                                     className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
                                 >
-                                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (teamOnly ? 'Join team' : 'Finish setup')}
+                                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save and continue'}
                                 </button>
                             </div>
                         </div>
                     )}
                 </div>
 
-                <p className="text-center text-xs text-gray-500 mt-4">
-                    Not {email}?{' '}
-                    <button
-                        type="button"
-                        onClick={async () => {
-                            await signOut();
-                            navigate('/login', { replace: true });
-                        }}
-                        className="text-blue-600 hover:text-blue-700 font-medium"
-                    >
-                        Sign out
-                    </button>
-                </p>
+                {step === 1 && (
+                    <p className="text-center text-xs text-gray-500 mt-4">
+                        Not {email}?{' '}
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                await signOut();
+                                navigate('/login', { replace: true });
+                            }}
+                            className="text-blue-600 hover:text-blue-700 font-medium"
+                        >
+                            Sign out
+                        </button>
+                    </p>
+                )}
             </div>
         </div>
     );

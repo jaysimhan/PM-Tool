@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { User, Task } from '../types/types';
 import { useData } from '../contexts/DataContext';
+import { supabase } from '../lib/supabaseClient';
 import { AlertCircle, CheckCircle, Clock, TrendingUp, Users as UsersIcon, Briefcase, Tag, Globe, Grid, Share2 } from 'lucide-react';
 import { getStatusBadgeColor, formatStatusLabel, getPriorityColor } from '../utils/capacityCalculations';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
@@ -22,6 +23,31 @@ const TEAM_SWAP_EXIT_MS = 400;
 export default function OrganizationDashboard({ currentUser, isPublic }: Props) {
     const { tasks: allTasks, teams, users, clients, regions, allTags } = useData();
     const [timeRange, setTimeRange] = useState<'week' | 'month' | 'quarter' | 'year' | 'lifetime'>('lifetime');
+    const [sharing, setSharing] = useState(false);
+
+    // The link is minted server-side and the token in it is the credential a signed-out
+    // visitor arrives with, so the URL cannot be assembled here -- the first admin to press
+    // this is the one who creates it. Anyone else gets the link that already exists, and is
+    // told plainly when there is none.
+    const shareDashboard = async () => {
+        setSharing(true);
+        try {
+            const { data, error } = await supabase.rpc('get_or_create_dashboard_link');
+            if (error) throw error;
+
+            const url = `${window.location.origin}/public/dashboard/${data.token}`;
+            await navigator.clipboard.writeText(url);
+            toast.success(
+                data.public_access
+                    ? 'Public dashboard link copied to clipboard!'
+                    : 'Link copied — but public access to it is currently off.'
+            );
+        } catch (err: any) {
+            toast.error(err?.message || 'Could not create the dashboard link.');
+        } finally {
+            setSharing(false);
+        }
+    };
 
     const tasks = useMemo(() => {
         if (timeRange === 'lifetime') return allTasks;
@@ -75,7 +101,7 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
     // Team workload summary
     const teamWorkload = teams.map(team => {
         const teamTasks = tasks.filter(t =>
-            t.teamIds.includes(team.id) &&
+            t.teamIds?.includes(team.id) &&
             (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
         );
         const teamMembers = users.filter(u => team.memberIds.includes(u.id));
@@ -238,15 +264,12 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
                         <option value="lifetime">Lifetime</option>
                     </select>
                     {!isPublic && (
-                        <button 
-                            onClick={() => {
-                                const url = `${window.location.origin}/public/dashboard`;
-                                navigator.clipboard.writeText(url);
-                                toast.success('Public dashboard link copied to clipboard!');
-                            }}
-                            className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 text-sm font-medium transition-colors"
+                        <button
+                            onClick={shareDashboard}
+                            disabled={sharing}
+                            className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            <Share2 className="w-4 h-4" /> Share Dashboard
+                            <Share2 className="w-4 h-4" /> {sharing ? 'Preparing link…' : 'Share Dashboard'}
                         </button>
                     )}
                 </div>

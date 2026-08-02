@@ -55,6 +55,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 { data: teamMembersData },
                 { data: clientsData },
                 { data: tasksData },
+                { data: taskTeamsData },
                 { data: commentsData },
                 { data: tagsData },
                 { data: regionsData },
@@ -69,6 +70,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 supabase.from('team_members').select('*'),
                 supabase.from('clients').select('*'),
                 supabase.from('tasks').select('*, task_tags(tags(*)), region:regions(*)'),
+                // Which team a task belongs to. Task.teamIds has always been on the type and
+                // read by the dashboard, workload filters and the review queue, and this is
+                // the table behind it -- it was simply never loaded, so every task arrived
+                // with the field missing and those screens counted nothing.
+                supabase.from('task_teams').select('task_id, team_id'),
                 supabase.from('comments').select('*'),
                 supabase.from('tags').select('*'),
                 supabase.from('regions').select('*'),
@@ -133,6 +139,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             }
             if (clientsData) setClients(clientsData);
             if (tasksData) {
+                const taskTeams = taskTeamsData || [];
                 const transformedTasks = tasksData.map((t: any) => ({
                     id: t.id,
                     title: t.title,
@@ -157,6 +164,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                     proposedEndDate: t.proposed_end_date,
                     estimatedHours: t.estimated_hours,
                     tags: (t.task_tags || []).map((tt: any) => tt.tags).filter(Boolean),
+                    teamIds: taskTeams.filter((tt: any) => tt.task_id === t.id).map((tt: any) => tt.team_id),
                     isSubtask: t.is_subtask,
                     createdDate: t.created_at,
                     subtaskIds: t.subtask_ids || [],
@@ -234,8 +242,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     };
 
     const refreshTasks = async () => {
-        const { data: tasksData } = await supabase.from('tasks').select('*, task_tags(tags(*)), region:regions(*)');
+        const [{ data: tasksData }, { data: taskTeamsData }] = await Promise.all([
+            supabase.from('tasks').select('*, task_tags(tags(*)), region:regions(*)'),
+            supabase.from('task_teams').select('task_id, team_id')
+        ]);
         if (tasksData) {
+            const taskTeams = taskTeamsData || [];
             const transformedTasks = tasksData.map((t: any) => ({
                 id: t.id,
                 title: t.title,
@@ -258,6 +270,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 proposedEndDate: t.proposed_end_date,
                 estimatedHours: t.estimated_hours,
                 tags: (t.task_tags || []).map((tt: any) => tt.tags).filter(Boolean),
+                teamIds: taskTeams.filter((tt: any) => tt.task_id === t.id).map((tt: any) => tt.team_id),
                 isSubtask: t.is_subtask,
                 createdDate: t.created_at,
                 subtaskIds: t.subtask_ids || [],

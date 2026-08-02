@@ -56,9 +56,13 @@ const AuthenticatedLayout = () => {
 const AuthenticatedRoutes = () => {
     const { profile: currentUser } = useAuth();
     if (!currentUser) return null; // Should be handled by ProtectedRoute
-    
+
     const user = currentUser as User;
-    
+
+    // Where "/" and anything unrecognised lands, for everyone. Not having a team is no longer a
+    // restricted state -- see ProtectedRoute -- so there is nothing to route around.
+    const home = '/workload';
+
     const wrap = (Component: React.ReactNode) => (
         <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
             {Component}
@@ -91,7 +95,7 @@ const AuthenticatedRoutes = () => {
 
     return (
         <Routes>
-            <Route path="/" element={<Navigate to="/workload" replace />} />
+            <Route path="/" element={<Navigate to={home} replace />} />
             {pages.map(page => (
                 <Route key={page.path} path={`/${page.path}`} element={page.element} />
             ))}
@@ -108,7 +112,7 @@ const AuthenticatedRoutes = () => {
                 </>
             )}
 
-            <Route path="*" element={<Navigate to="/workload" replace />} />
+            <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>
     );
 };
@@ -153,7 +157,12 @@ export default function App() {
                 {/* Invite landing: authenticated but not yet a member of the org. Onboarding
                     guards on the session itself so a slow session restore doesn't bounce it. */}
                 <Route path="/welcome" element={<Onboarding />} />
+                {/* Public on purpose: the token in the path is the only credential, and it
+                    is checked server-side by get_public_dashboard. The untokenised path is
+                    kept because the old Share Dashboard button copied it, and it says so
+                    rather than rendering an empty org. */}
                 <Route path="/public/dashboard" element={<PublicDashboard />} />
+                <Route path="/public/dashboard/:token" element={<PublicDashboard />} />
                 {/* The shareable link from Share Request Form. Public on purpose: the token
                     in the path is the only credential, and it is checked server-side. */}
                 <Route path="/request/:token" element={<PublicRequestForm />} />
