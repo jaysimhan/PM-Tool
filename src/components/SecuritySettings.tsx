@@ -1,11 +1,23 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Eye, EyeOff, Info, Loader2, Shield, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { ArrowLeft, Eye, EyeOff, Info, Loader2, Shield, ShieldCheck, ShieldAlert, KeyRound, Copy, Download, RefreshCw } from 'lucide-react';
 import { ActiveSessions } from './ActiveSessions';
+import { useAuth } from '../contexts/AuthContext';
+import toast from 'react-hot-toast';
+import {
+    RecoveryCodeStatus,
+    generateRecoveryCodes,
+    getRecoveryCodeStatus,
+    recoveryCodesAsText,
+    redeemRecoveryCode,
+    verifyCurrentPassword,
+    verifyTotpCode,
+} from '../lib/mfa';
 
 export function SecuritySettings() {
     const navigate = useNavigate();
+    const { user, mfaRequired, recoveryMode, clearRecoveryMode, checkMfa } = useAuth();
 
     // MFA state
     const [isMfaEnabled, setIsMfaEnabled] = useState(false);
@@ -14,6 +26,19 @@ export function SecuritySettings() {
     const [qrCode, setQrCode] = useState<string | null>(null);
     const [factorId, setFactorId] = useState<string | null>(null);
     const [verifyCode, setVerifyCode] = useState('');
+
+    // Recovery codes. `freshCodes` is the one moment they exist in the clear -- once this
+    // screen is left there is nothing but hashes, by design.
+    const [freshCodes, setFreshCodes] = useState<string[] | null>(null);
+    const [codeStatus, setCodeStatus] = useState<RecoveryCodeStatus | null>(null);
+    const [codesLoading, setCodesLoading] = useState(false);
+
+    // The challenge this screen puts up for itself when a reset link lands on an account
+    // that has 2FA. Separate state from the enrolment box above, which is a different job.
+    const [challengeCode, setChallengeCode] = useState('');
+    const [challengeUsesRecovery, setChallengeUsesRecovery] = useState(false);
+    const [challengeLoading, setChallengeLoading] = useState(false);
+    const [challengeError, setChallengeError] = useState<string | null>(null);
 
     useEffect(() => {
         checkMfaStatus();
@@ -25,6 +50,7 @@ export function SecuritySettings() {
             if (error) throw error;
             const totp = data.all.find(f => f.factor_type === 'totp' && f.status === 'verified');
             setIsMfaEnabled(!!totp);
+            setCodeStatus(totp ? await getRecoveryCodeStatus() : null);
         } catch (err) {
             console.error('Error checking MFA status:', err);
         }
@@ -67,10 +93,76 @@ export function SecuritySettings() {
             setQrCode(null);
             setFactorId(null);
             setVerifyCode('');
+
+            // Straight after enrolling, while the person is still here to write them down.
+            // Handing out no codes at all is how an account becomes unreachable later.
+            const codes = await generateRecoveryCodes();
+            setFreshCodes(codes);
+            setCodeStatus(await getRecoveryCodeStatus());
+            await checkMfa();
         } catch (err: any) {
             setMfaError(err.message || 'Failed to verify 2FA code');
         } finally {
             setMfaLoading(false);
+        }
+    };
+
+    const handleRegenerateCodes = async () => {
+        setCodesLoading(true);
+        setMfaError(null);
+        try {
+            const codes = await generateRecoveryCodes();
+            setFreshCodes(codes);
+            setCodeStatus(await getRecoveryCodeStatus());
+            toast.success('New recovery codes generated. The old ones no longer work.');
+        } catch (err: any) {
+            setMfaError(err.message || 'Failed to generate recovery codes');
+        } finally {
+            setCodesLoading(false);
+        }
+    };
+
+    const copyCodes = async (codes: string[]) => {
+        try {
+            await navigator.clipboard.writeText(codes.join('\n'));
+            toast.success('Recovery codes copied.');
+        } catch {
+            toast.error('Could not copy. Select the codes and copy them by hand.');
+        }
+    };
+
+    const downloadCodes = (codes: string[]) => {
+        const blob = new Blob([recoveryCodesAsText(codes, user?.email)], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'workflow-pro-recovery-codes.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    // Only reachable on a reset link for an account with 2FA: prove the second factor before
+    // the password can be rewritten, with the recovery code as the way through if the
+    // authenticator is what went missing.
+    const handleChallenge = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setChallengeLoading(true);
+        setChallengeError(null);
+        try {
+            if (challengeUsesRecovery) {
+                await redeemRecoveryCode(challengeCode);
+                toast.success('Two-factor authentication has been turned off. Set it up again below once your password is saved.');
+            } else {
+                await verifyTotpCode(challengeCode);
+            }
+            await checkMfa();
+            await checkMfaStatus();
+            setChallengeCode('');
+        } catch (err: any) {
+            setChallengeError(err.message || 'That code was not accepted.');
+            setChallengeCode('');
+        } finally {
+            setChallengeLoading(false);
         }
     };
 
@@ -86,6 +178,10 @@ export function SecuritySettings() {
                 const { error: unenrollError } = await supabase.auth.mfa.unenroll({ factorId: totp.id });
                 if (unenrollError) throw unenrollError;
                 setIsMfaEnabled(false);
+                // The codes only ever unlocked that factor.
+                setFreshCodes(null);
+                setCodeStatus(null);
+                await checkMfa();
             }
         } catch (err: any) {
             setMfaError(err.message || 'Failed to disable 2FA');
@@ -157,12 +253,15 @@ export function SecuritySettings() {
             const { data: { session } } = await supabase.auth.getSession();
             if (!session?.user?.email) throw new Error("No active session found.");
 
-            // Verify current password first
-            const { error: signInError } = await supabase.auth.signInWithPassword({
-                email: session.user.email,
-                password: currentPassword
-            });
-            if (signInError) throw new Error("Incorrect current password.");
+            // Someone who arrived on a reset link does not know the old password -- that is
+            // the entire reason they are here. Everybody else proves it first, and proves it
+            // against the stored hash rather than by signing in again: a password sign-in
+            // mints a fresh aal1 session, which would throw away the 2FA this one has already
+            // passed and bounce them back to the code prompt mid-save.
+            if (!recoveryMode) {
+                const passwordOk = await verifyCurrentPassword(currentPassword);
+                if (!passwordOk) throw new Error("Incorrect current password.");
+            }
 
             // Update to new password
             const { error: updateError } = await supabase.auth.updateUser({
@@ -174,6 +273,7 @@ export function SecuritySettings() {
             setCurrentPassword('');
             setNewPassword('');
             setRetypePassword('');
+            clearRecoveryMode();
 
             setTimeout(() => {
                 navigate('/');
@@ -184,6 +284,93 @@ export function SecuritySettings() {
             setLoading(false);
         }
     };
+
+    // A reset link is the one way onto this screen without having passed 2FA, and an email
+    // inbox on its own should not be enough to rewrite the password of an account that has a
+    // second factor. So the screen asks for it here. Someone whose authenticator is what went
+    // missing spends a recovery code instead and carries on to the form behind this.
+    if (recoveryMode && mfaRequired) {
+        const challengeReady = challengeUsesRecovery
+            ? challengeCode.replace(/[^0-9a-zA-Z]/g, '').length >= 12
+            : challengeCode.length === 6;
+
+        return (
+            <div className="min-h-screen bg-gray-50 py-12 px-4 flex justify-center font-sans">
+                <div className="max-w-md w-full">
+                    <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-200">
+                        <h1 className="text-xl font-bold text-gray-900 mb-1 flex items-center gap-2">
+                            <Shield className="w-5 h-5" />
+                            Two-Factor Authentication
+                        </h1>
+                        <p className="text-sm text-gray-500 mb-6">
+                            This account has 2FA switched on. Confirm it before choosing a new password.
+                        </p>
+
+                        {challengeError && (
+                            <div className="mb-4 bg-red-50 text-red-700 px-4 py-3 rounded-lg text-sm border border-red-100">
+                                {challengeError}
+                            </div>
+                        )}
+
+                        <form onSubmit={handleChallenge} className="space-y-4">
+                            {challengeUsesRecovery && (
+                                <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
+                                    Using a recovery code switches two-factor authentication off. You can
+                                    set it up again from this screen once your password is saved.
+                                </div>
+                            )}
+
+                            <input
+                                type="text"
+                                required
+                                autoFocus
+                                autoComplete="one-time-code"
+                                maxLength={challengeUsesRecovery ? 20 : 6}
+                                placeholder={challengeUsesRecovery ? 'a1b2c3-d4e5f6' : '123456'}
+                                value={challengeCode}
+                                onChange={(e) => setChallengeCode(
+                                    challengeUsesRecovery ? e.target.value : e.target.value.replace(/\D/g, '')
+                                )}
+                                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all tracking-widest font-mono text-center text-lg"
+                            />
+
+                            <button
+                                type="submit"
+                                disabled={challengeLoading || !challengeReady}
+                                className="w-full px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                            >
+                                {challengeLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                                Continue
+                            </button>
+                        </form>
+
+                        <div className="mt-5 flex flex-col items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setChallengeUsesRecovery(v => !v);
+                                    setChallengeCode('');
+                                    setChallengeError(null);
+                                }}
+                                className="text-sm font-medium text-blue-600 hover:underline"
+                            >
+                                {challengeUsesRecovery
+                                    ? 'Use my authenticator app instead'
+                                    : 'Lost your authenticator? Use a recovery code'}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { clearRecoveryMode(); navigate('/login'); }}
+                                className="text-sm text-gray-500 hover:text-gray-700"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-screen bg-gray-50 py-12 px-4 flex justify-center font-sans">
@@ -285,6 +472,74 @@ export function SecuritySettings() {
                                 </div>
                             </div>
                         )}
+
+                        {/* Recovery codes. Only meaningful once there is a factor to recover
+                            from, so the whole block stays out of the way until then. */}
+                        {isMfaEnabled && !qrCode && (
+                            <div className="pt-4 border-t border-gray-200 space-y-3">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="flex-1">
+                                        <h4 className="text-sm font-medium text-gray-900 flex items-center gap-1.5">
+                                            <KeyRound className="w-4 h-4" />
+                                            Recovery codes
+                                        </h4>
+                                        <p className="text-xs text-gray-500 mt-1">
+                                            {codeStatus && codeStatus.total > 0
+                                                ? `${codeStatus.unused} of ${codeStatus.total} still unused. Each one signs you in once if your authenticator is gone, and switches 2FA off when it is used.`
+                                                : 'None saved. Without one, a lost authenticator locks you out of this account.'}
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={handleRegenerateCodes}
+                                        disabled={codesLoading}
+                                        className="px-3 py-1.5 whitespace-nowrap flex-shrink-0 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                                    >
+                                        {codesLoading
+                                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                                            : <RefreshCw className="w-3.5 h-3.5" />}
+                                        {codeStatus && codeStatus.total > 0 ? 'Regenerate' : 'Generate codes'}
+                                    </button>
+                                </div>
+
+                                {freshCodes && (
+                                    <div className="bg-white border border-amber-200 rounded-lg p-4">
+                                        <p className="text-sm font-medium text-amber-800 mb-1">
+                                            Save these now — this is the only time they are shown.
+                                        </p>
+                                        <p className="text-xs text-gray-500 mb-3">
+                                            Only the hashes are kept, so nobody, including an admin, can read them
+                                            back to you later. Keep them somewhere other than the phone with the
+                                            authenticator on it.
+                                        </p>
+                                        <div className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-sm text-gray-800 mb-3">
+                                            {freshCodes.map(code => <span key={code}>{code}</span>)}
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
+                                            <button
+                                                onClick={() => copyCodes(freshCodes)}
+                                                className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 flex items-center gap-1.5"
+                                            >
+                                                <Copy className="w-3.5 h-3.5" />
+                                                Copy
+                                            </button>
+                                            <button
+                                                onClick={() => downloadCodes(freshCodes)}
+                                                className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 flex items-center gap-1.5"
+                                            >
+                                                <Download className="w-3.5 h-3.5" />
+                                                Download
+                                            </button>
+                                            <button
+                                                onClick={() => setFreshCodes(null)}
+                                                className="px-3 py-1.5 text-sm font-medium rounded-lg text-gray-500 hover:text-gray-700"
+                                            >
+                                                I've saved them
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -306,28 +561,38 @@ export function SecuritySettings() {
                             </div>
                         )}
 
-                        {/* Current Password */}
-                        <div className="space-y-1">
-                            <label className="block text-sm font-medium text-gray-700">
-                                Current Password <span className="text-gray-500">*</span>
-                            </label>
-                            <div className="relative">
-                                <input
-                                    type={showCurrent ? "text" : "password"}
-                                    required
-                                    value={currentPassword}
-                                    onChange={(e) => setCurrentPassword(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => setShowCurrent(!showCurrent)}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 rounded-md"
-                                >
-                                    {showCurrent ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                                </button>
+                        {/* Current Password. Not asked for on a reset link -- not knowing it is
+                            what sent them to their email in the first place. Left out of the
+                            DOM entirely rather than hidden, so `required` cannot block a submit
+                            on a field nobody can see. */}
+                        {recoveryMode ? (
+                            <div className="bg-blue-50 text-blue-800 px-4 py-3 rounded-lg text-sm border border-blue-100">
+                                You followed a password reset link, so there is no need to enter your
+                                old password. Choose a new one below.
                             </div>
-                        </div>
+                        ) : (
+                            <div className="space-y-1">
+                                <label className="block text-sm font-medium text-gray-700">
+                                    Current Password <span className="text-gray-500">*</span>
+                                </label>
+                                <div className="relative">
+                                    <input
+                                        type={showCurrent ? "text" : "password"}
+                                        required
+                                        value={currentPassword}
+                                        onChange={(e) => setCurrentPassword(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowCurrent(!showCurrent)}
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 rounded-md"
+                                    >
+                                        {showCurrent ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
 
                         {/* New Password */}
                         <div className="space-y-1">
@@ -422,7 +687,7 @@ export function SecuritySettings() {
                         <div className="pt-2 flex justify-end">
                             <button
                                 type="submit"
-                                disabled={loading || !currentPassword || !newPassword || !retypePassword || strengthScore < 5}
+                                disabled={loading || (!recoveryMode && !currentPassword) || !newPassword || !retypePassword || strengthScore < 5}
                                 className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed text-sm"
                             >
                                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'SAVE'}

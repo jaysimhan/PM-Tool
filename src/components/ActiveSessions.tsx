@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Laptop, Loader2, LogOut, MapPin, Monitor, Smartphone, Tablet } from 'lucide-react';
+import { Globe, Laptop, Loader2, LogOut, Monitor, Smartphone, Tablet } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
 import { useConfirm } from '../contexts/ConfirmContext';
 import toast from 'react-hot-toast';
@@ -12,9 +12,10 @@ import toast from 'react-hot-toast';
  * refreshed its access token, which the client does roughly hourly while a tab is open, so it
  * is a real heartbeat rather than the sign-in time repeated back.
  *
- * Location is best-effort. GoTrue records the IP and nothing more, so a geo-IP lookup is the
- * only way to turn it into a place; when that is unavailable the address is shown on its own
- * rather than a guess.
+ * The IP is shown as recorded and not resolved to a place. Turning one into a city means
+ * handing it to a geo-IP service, and sending every employee's address to a third party is a
+ * poor trade for a label -- the device and the last-active time are what actually identify a
+ * session you do not recognise.
  */
 
 interface Session {
@@ -89,7 +90,6 @@ const DeviceIcon = ({ kind }: { kind: 'desktop' | 'mobile' | 'tablet' }) => {
 export function ActiveSessions() {
     const { confirm } = useConfirm();
     const [sessions, setSessions] = useState<Session[]>([]);
-    const [locations, setLocations] = useState<Record<string, string>>({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [busyId, setBusyId] = useState<string | null>(null);
@@ -105,15 +105,6 @@ export function ActiveSessions() {
         }
         setSessions((data || []) as Session[]);
         setLoading(false);
-
-        // Separate and optional: the list is useful without it, so a missing or throttled
-        // lookup service must not hold up rendering or surface as an error.
-        try {
-            const { data: geo } = await supabase.functions.invoke('session-locations', { body: {} });
-            if (geo?.locations) setLocations(geo.locations);
-        } catch {
-            /* Shown as the bare IP instead. */
-        }
     }, []);
 
     useEffect(() => { load(); }, [load]);
@@ -233,7 +224,6 @@ export function ActiveSessions() {
                 <div className="space-y-3">
                     {sessions.map(session => {
                         const { label, kind } = describeDevice(session.userAgent);
-                        const location = session.ip ? locations[session.ip] : undefined;
 
                         return (
                             <div
@@ -262,13 +252,11 @@ export function ActiveSessions() {
 
                                             <div className="mt-1.5 space-y-1 text-xs text-gray-600">
                                                 <div className="flex items-center gap-1.5">
-                                                    <MapPin className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                                                    {location ? (
-                                                        <span>{location} · <span className="font-mono">{session.ip}</span></span>
-                                                    ) : session.ip ? (
+                                                    <Globe className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                                                    {session.ip ? (
                                                         <span className="font-mono">{session.ip}</span>
                                                     ) : (
-                                                        <span className="text-gray-400">Location unavailable</span>
+                                                        <span className="text-gray-400">Address not recorded</span>
                                                     )}
                                                 </div>
                                                 <div>

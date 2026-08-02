@@ -337,13 +337,17 @@ export default function RequestForm({ currentUser }: Props) {
                     const newDept = formData.department.trim();
                     
                     if (newDept && !existingDepts.some(d => d.toLowerCase() === newDept.toLowerCase())) {
-                        const updatedDepts = client.department ? `${client.department}, ${newDept}` : newDept;
-                        await supabase
-                            .from('clients')
-                            .update({ department: updatedDepts })
-                            .eq('id', client.id);
-                        
-                        await refreshClients();
+                        // Brands are admin-owned, and this append is the one thing a requester
+                        // legitimately writes to one -- so it goes through the function that
+                        // does only that, rather than an UPDATE that could rewrite the row.
+                        const { error: deptError } = await supabase.rpc('add_client_department', {
+                            p_client_id: client.id,
+                            p_department: newDept,
+                        });
+                        // Not worth failing the request over: the task is already saved and the
+                        // department is recorded on it either way.
+                        if (deptError) console.error('Could not add the department to the brand:', deptError);
+                        else await refreshClients();
                     }
                 }
             }

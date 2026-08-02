@@ -4,9 +4,11 @@ import { AccessRequestModal, AccessRequestKind } from './AccessRequestModal';
 import { Logo } from './Logo';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
+import { verifyTotpCode, redeemRecoveryCode } from '../lib/mfa';
+import toast from 'react-hot-toast';
 
 export function Login() {
-  const { session, mfaRequired, checkMfa } = useAuth();
+  const { session, mfaRequired, checkMfa, signOut } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
@@ -19,7 +21,15 @@ export function Login() {
   
   // MFA state
   const [verifyCode, setVerifyCode] = useState("")
-  
+  // The way past a lost authenticator: a one-time code that removes the factor instead of
+  // satisfying it. Off by default so the ordinary sign-in is never cluttered by it.
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false)
+  const [recoveryCode, setRecoveryCode] = useState("")
+
+  // Forgot password
+  const [resetSent, setResetSent] = useState<string | null>(null)
+  const [resetting, setResetting] = useState(false)
+
   const [accessRequestKind, setAccessRequestKind] = useState<AccessRequestKind | null>(null)
 
   const [hovered, setHovered] = useState(false)
@@ -67,32 +77,69 @@ export function Login() {
     setError(null);
 
     try {
-        const { data, error } = await supabase.auth.mfa.listFactors();
-        if (error) throw error;
-
-        const totp = data.all.find(f => f.factor_type === 'totp' && f.status === 'verified');
-        if (!totp) {
-            throw new Error('No verified TOTP factor found');
-        }
-
-        const { data: challengeData, error: challengeError } = await supabase.auth.mfa.challenge({ factorId: totp.id });
-        if (challengeError) throw challengeError;
-
-        const { error: verifyError } = await supabase.auth.mfa.verify({
-            factorId: totp.id,
-            challengeId: challengeData.id,
-            code: verifyCode
-        });
-        if (verifyError) throw verifyError;
-
+        await verifyTotpCode(verifyCode);
         await checkMfa();
-        
     } catch (err: any) {
         setError(err.message || 'Failed to verify 2FA code');
+        // A code that failed is spent either way -- the next one from the app is a new six
+        // digits, so leaving the old ones in the box only gets in the way of typing them.
+        setVerifyCode("");
     } finally {
         setLoading(false);
     }
   }
+
+  // The authenticator is gone. A recovery code cannot produce the six digits, so it takes the
+  // factor away instead and lets them in with 2FA switched off -- which is worth saying out
+  // loud, hence the toast on the way through.
+  async function handleRedeemRecovery(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    try {
+        await redeemRecoveryCode(recoveryCode);
+        await checkMfa();
+        toast.success('Two-factor authentication has been turned off. Set it up again from Security Settings.', { duration: 8000 });
+    } catch (err: any) {
+        setError(err.message || 'Failed to use that recovery code');
+        setRecoveryCode("");
+    } finally {
+        setLoading(false);
+    }
+  }
+
+  // Deliberately says the same thing whether or not the address is known, like the access
+  // request routes below it.
+  async function handleForgotPassword() {
+    setError(null);
+    setResetSent(null);
+
+    if (!email.trim()) {
+        setError('Enter your email address first, then choose "Forgot password?".');
+        return;
+    }
+
+    setResetting(true);
+    try {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+            // Where the link lands. The reset form lives on the security screen, which knows
+            // to ask only for a new password when it was reached this way.
+            redirectTo: `${window.location.origin}/security-settings`,
+        });
+        if (error) throw error;
+        setResetSent('If that address has an account, a reset link is on its way. The link is good for one hour.');
+    } catch (err: any) {
+        setError(err.message || 'Could not send the reset email.');
+    } finally {
+        setResetting(false);
+    }
+  }
+
+  // Both boxes feed the same button, so the button only has one question to ask.
+  const mfaSubmitDisabled = loading || (useRecoveryCode
+    ? recoveryCode.replace(/[^0-9a-zA-Z]/g, '').length < 12
+    : verifyCode.length !== 6);
 
   return (
     <div className="min-h-screen w-full flex bg-[#f8fbff]" style={{ fontFamily: "'Inter', sans-serif" }}>
@@ -132,51 +179,82 @@ export function Login() {
                 {mfaRequired ? "Two-Factor Authentication" : "Welcome back"}
             </h1>
             <p className="text-[14px] text-gray-500">
-                {mfaRequired ? "Enter the code from your authenticator app" : "Sign in to your WorkFlow Pro account"}
+                {mfaRequired
+                    ? (useRecoveryCode
+                        ? "Enter one of the recovery codes you saved when you set 2FA up"
+                        : "Enter the code from your authenticator app")
+                    : "Sign in to your WorkFlow Pro account"}
             </p>
           </div>
 
           {mfaRequired ? (
-              <form onSubmit={handleVerifyMfa} className="space-y-4">
+              <form onSubmit={useRecoveryCode ? handleRedeemRecovery : handleVerifyMfa} className="space-y-4">
                 {error && (
                     <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-md text-[13px]">
                         {error}
                     </div>
                 )}
-                
-                <div>
-                  <label className="block text-[13px] font-medium text-gray-700 mb-1.5">
-                    6-digit Code
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      maxLength={6}
-                      required
-                      placeholder="123456"
-                      value={verifyCode}
-                      onChange={(e) => setVerifyCode(e.target.value.replace(/\D/g, ''))}
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-[13px] text-gray-800 placeholder-gray-400 outline-none transition-all tracking-widest font-mono text-center text-lg"
-                      style={{ boxShadow: "none" }}
-                      onFocus={e => { e.currentTarget.style.borderColor = "#3a74df"; e.currentTarget.style.boxShadow = "0 0 0 3px rgba(58,116,223,0.15)" }}
-                      onBlur={e => { e.currentTarget.style.borderColor = ""; e.currentTarget.style.boxShadow = "none" }}
-                    />
+
+                {useRecoveryCode ? (
+                  <>
+                    <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-md text-[13px]">
+                      Using a recovery code switches two-factor authentication off for this
+                      account. You will be asked to set it up again once you are in.
+                    </div>
+                    <div>
+                      <label className="block text-[13px] font-medium text-gray-700 mb-1.5">
+                        Recovery code
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        autoComplete="one-time-code"
+                        placeholder="a1b2c3-d4e5f6"
+                        value={recoveryCode}
+                        onChange={(e) => setRecoveryCode(e.target.value)}
+                        className="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-[13px] text-gray-800 placeholder-gray-400 outline-none transition-all tracking-widest font-mono text-center text-lg"
+                        style={{ boxShadow: "none" }}
+                        onFocus={e => { e.currentTarget.style.borderColor = "#3a74df"; e.currentTarget.style.boxShadow = "0 0 0 3px rgba(58,116,223,0.15)" }}
+                        onBlur={e => { e.currentTarget.style.borderColor = ""; e.currentTarget.style.boxShadow = "none" }}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <label className="block text-[13px] font-medium text-gray-700 mb-1.5">
+                      6-digit Code
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        maxLength={6}
+                        required
+                        autoComplete="one-time-code"
+                        placeholder="123456"
+                        value={verifyCode}
+                        onChange={(e) => setVerifyCode(e.target.value.replace(/\D/g, ''))}
+                        className="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-[13px] text-gray-800 placeholder-gray-400 outline-none transition-all tracking-widest font-mono text-center text-lg"
+                        style={{ boxShadow: "none" }}
+                        onFocus={e => { e.currentTarget.style.borderColor = "#3a74df"; e.currentTarget.style.boxShadow = "0 0 0 3px rgba(58,116,223,0.15)" }}
+                        onBlur={e => { e.currentTarget.style.borderColor = ""; e.currentTarget.style.boxShadow = "none" }}
+                      />
+                    </div>
                   </div>
-                </div>
-    
+                )}
+
                 {/* Submit */}
                 <button
                   ref={btnRef}
                   type="submit"
-                  disabled={loading || verifyCode.length !== 6}
+                  disabled={mfaSubmitDisabled}
                   onMouseEnter={() => setHovered(true)}
                   onMouseLeave={() => { setHovered(false); setPressed(false) }}
                   onMouseDown={(e) => { setPressed(true); spawnRipple(e) }}
                   onMouseUp={() => setPressed(false)}
                   className="w-full py-2.5 rounded-lg text-[13px] font-semibold text-white flex items-center justify-center gap-2 overflow-hidden relative mt-2"
                   style={{
-                    background: (loading || verifyCode.length !== 6) ? "#7aaedf" : "linear-gradient(135deg, #740092, #3a74df 60%, #0092ee)",
-                    cursor: (loading || verifyCode.length !== 6) ? "not-allowed" : "pointer",
+                    background: mfaSubmitDisabled ? "#7aaedf" : "linear-gradient(135deg, #740092, #3a74df 60%, #0092ee)",
+                    cursor: mfaSubmitDisabled ? "not-allowed" : "pointer",
                     transform: pressed ? "scale(0.97)" : hovered ? "translateY(-2px)" : "translateY(0)",
                     boxShadow: pressed
                       ? "0 2px 8px rgba(58,116,223,0.3)"
@@ -214,15 +292,40 @@ export function Login() {
                       Verifying...
                     </>
                   ) : (
-                    "Verify Code"
+                    useRecoveryCode ? "Use recovery code" : "Verify Code"
                   )}
                 </button>
-                
+
                 <div className="text-center mt-4">
-                    <button 
+                    <button
                         type="button"
                         onClick={() => {
-                            supabase.auth.signOut();
+                            setUseRecoveryCode(v => !v);
+                            setError(null);
+                            setVerifyCode("");
+                            setRecoveryCode("");
+                        }}
+                        className="text-[13px] font-medium transition-colors hover:underline"
+                        style={{ color: "#3a74df" }}
+                    >
+                        {useRecoveryCode
+                            ? "Use my authenticator app instead"
+                            : "Lost your authenticator? Use a recovery code"}
+                    </button>
+                </div>
+
+                <div className="text-center mt-2">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            // The context's version, not a bare signOut: it also drops the
+                            // "keep me signed in" deadline, which otherwise carries over to
+                            // whoever signs in next on this browser.
+                            signOut();
+                            setVerifyCode("");
+                            setRecoveryCode("");
+                            setUseRecoveryCode(false);
+                            setError(null);
                         }}
                         className="text-[13px] text-gray-500 hover:text-gray-700 font-medium transition-colors"
                     >
@@ -237,7 +340,12 @@ export function Login() {
                         {error}
                     </div>
                 )}
-                
+                {resetSent && (
+                    <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-md text-[13px]">
+                        {resetSent}
+                    </div>
+                )}
+
                 {/* Email */}
                 <div>
                   <label className="block text-[13px] font-medium text-gray-700 mb-1.5">
@@ -268,8 +376,14 @@ export function Login() {
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[13px] font-medium text-gray-700">Password</label>
-                    <button type="button" className="text-[12px] font-medium transition-colors" style={{ color: "#3a74df" }}>
-                      Forgot password?
+                    <button
+                      type="button"
+                      onClick={handleForgotPassword}
+                      disabled={resetting}
+                      className="text-[12px] font-medium transition-colors hover:underline disabled:opacity-60"
+                      style={{ color: "#3a74df" }}
+                    >
+                      {resetting ? "Sending…" : "Forgot password?"}
                     </button>
                   </div>
                   <div className="relative">

@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabaseClient';
+import { useAuth } from './AuthContext';
 import { User, Team, Skill, WorkCategory, Client, Task, Comment, Leave, Assignment, Notification, UserSkill, Tag, Region } from '../types/types';
 
-interface DataContextType {
+export interface DataContextType {
     users: User[];
     teams: Team[];
     skills: Skill[];
@@ -25,9 +26,12 @@ interface DataContextType {
     refreshUsers: () => Promise<void>;
 }
 
-const DataContext = createContext<DataContextType | undefined>(undefined);
+// Exported so the test environment can re-provide it with invented data — see
+// TestDataProvider. Nothing else should reach past useData() to touch it.
+export const DataContext = createContext<DataContextType | undefined>(undefined);
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
+    const { session } = useAuth();
     const [users, setUsers] = useState<User[]>([]);
     const [teams, setTeams] = useState<Team[]>([]);
     const [skills, setSkills] = useState<Skill[]>([]);
@@ -332,9 +336,29 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
+    // Keyed on the session, not on mount.
+    //
+    // Every table here is behind RLS now, so a request made before the session has been
+    // restored from storage comes back empty rather than with the org's data -- and this used
+    // to fire exactly once, which would have left a signed-in person looking at a blank
+    // dashboard until they reloaded. It also stops the login screen and the public request
+    // form from asking for data they are not entitled to.
     useEffect(() => {
+        if (!session) {
+            // Nothing to show, and nothing left over from whoever was signed in before.
+            setUsers([]);
+            setTeams([]);
+            setSkills([]);
+            setClients([]);
+            setTasks([]);
+            setComments([]);
+            setAllTags([]);
+            setRegions([]);
+            setLoading(false);
+            return;
+        }
         fetchData();
-    }, []);
+    }, [session?.user?.id]);
 
     return (
         <DataContext.Provider value={{

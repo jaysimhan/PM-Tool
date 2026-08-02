@@ -9,6 +9,8 @@ interface AuthContextType {
     profile: User | null;
     loading: boolean;
     mfaRequired: boolean;
+    recoveryMode: boolean;
+    clearRecoveryMode: () => void;
     signOut: () => Promise<void>;
     updateProfile: (updates: Partial<User>) => Promise<void>;
     refreshProfile: () => Promise<void>;
@@ -78,6 +80,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [profile, setProfile] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [mfaRequired, setMfaRequired] = useState(false);
+    // True from the moment a password-reset link is opened until the reset is finished or
+    // abandoned. It is the only thing that lets Security Settings ask for a new password
+    // without asking for the old one first -- the person following that link does not have it.
+    const [recoveryMode, setRecoveryMode] = useState(false);
     // users.sessions_revoked_at, as of the last profile load. Set when an admin removes
     // somebody from their team or deactivates them.
     const [sessionsRevokedAt, setSessionsRevokedAt] = useState<string | null>(null);
@@ -95,7 +101,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
 
         // Listen for auth changes
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+            // Fired when supabase-js consumes the token out of a reset link. It is the only
+            // signal that distinguishes "arrived here from their email" from "signed in".
+            if (event === 'PASSWORD_RECOVERY') setRecoveryMode(true);
+            if (event === 'SIGNED_OUT') setRecoveryMode(false);
+
             setSession(session);
             setUser(session?.user ?? null);
             if (session?.user) {
@@ -146,14 +157,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         };
     }, [session, sessionsRevokedAt]);
 
+    // Whether the session in hand still owes a second factor: it was issued at aal1 and the
+    // account has a verified factor that would take it to aal2. Only ever called with a
+    // session already in hand.
     const checkMfa = async () => {
         try {
             const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-            if (!error && data) {
-                setMfaRequired(data.nextLevel === 'aal2' && data.currentLevel === 'aal1');
-            }
+            if (error) throw error;
+            setMfaRequired(data.nextLevel === 'aal2' && data.currentLevel === 'aal1');
         } catch (err) {
+            // Fail closed. Leaving the flag alone on an error waves a half-authenticated
+            // session straight past the code prompt, which is the one thing it must not do.
+            // The way out is "Sign in as different user" on the login screen.
             console.error('Error checking MFA:', err);
+            setMfaRequired(true);
         }
     };
 
@@ -252,6 +269,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await fetchProfile(user.id);
     };
 
+    // Called once the reset is done with, so the screen goes back to asking for the old
+    // password and a stale flag cannot hold the door open on the next visit.
+    const clearRecoveryMode = () => setRecoveryMode(false);
+
     const signOut = async () => {
         await supabase.auth.signOut();
         // Leaving the deadline behind would cut short whoever signs in next on this browser.
@@ -259,7 +280,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     return (
-        <AuthContext.Provider value={{ session, user, profile, loading, mfaRequired, signOut, updateProfile, refreshProfile, checkMfa }}>
+        <AuthContext.Provider value={{ session, user, profile, loading, mfaRequired, recoveryMode, clearRecoveryMode, signOut, updateProfile, refreshProfile, checkMfa }}>
             {children}
         </AuthContext.Provider>
     );

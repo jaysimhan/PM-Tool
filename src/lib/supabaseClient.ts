@@ -107,25 +107,166 @@ const authStorage = {
     },
 };
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+/** The real connection. Everything goes out through the guarded `supabase` export below. */
+const liveClient = createClient(supabaseUrl, supabaseAnonKey, {
     auth: { storage: authStorage },
 });
 
-const supabaseServiceRoleKey = import.meta.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+// ── Test-environment guard ───────────────────────────────────────────────────
+//
+// The pages under /test run on invented data (src/data/testFixtures.ts). The rule that makes
+// that a test environment rather than a second way into production is this one: while the
+// browser is on a /test path, nothing that would change the real product is allowed onto the
+// wire. Writes are intercepted here, at the only client in the app, so no page has to
+// remember to opt out -- including pages nobody has thought about yet.
+//
+// Reads are left alone. Auth needs them (the profile behind the session is a real row), and
+// the sandbox's ids all start with `test-`, so a query that goes out keyed on one matches
+// nothing. What the pages actually display comes from the fixtures, not from here.
+
+const TEST_PATH = /^\/test(\/|$)/;
+
+/** True while the browser is somewhere under /test. */
+export const inTestSandbox = () =>
+    typeof window !== 'undefined' && TEST_PATH.test(window.location.pathname);
+
+export type SandboxWrite = {
+    table: string;
+    op: 'insert' | 'update' | 'upsert' | 'delete' | 'rpc' | 'invoke';
+    values: any;
+    /** The .eq()/.match() narrowing the caller asked for, in the order it was given. */
+    filters: { column: string; value: any }[];
+    /** What the caller is handed back, so optimistic UI has something to work with. */
+    rows: any[];
+};
+
+let sandboxSink: ((write: SandboxWrite) => void) | null = null;
 
 /**
- * Admin calls only (invites). It must not touch the session store: supabase-js derives the
- * storage key from the project URL alone, so without this both clients share
- * `sb-<ref>-auth-token` -- and both run an auto-refresh ticker against the same rotating
- * refresh token. Whichever one loses that race gets "Invalid Refresh Token: Already Used",
- * which auth-js treats as fatal and answers by clearing the session. That is a signed-in
- * user being logged out at random, and no "remember me" setting survives it.
+ * Watch the writes the sandbox swallowed. The test data provider uses this to apply them to
+ * its in-memory copy, so editing something in /test looks like it worked -- which it did,
+ * for as long as the tab is open.
  */
-export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey || 'service-role-key', {
-    auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
-        storageKey: 'pmweb-admin-no-session',
+export const onSandboxWrite = (handler: (write: SandboxWrite) => void) => {
+    sandboxSink = handler;
+    return () => {
+        if (sandboxSink === handler) sandboxSink = null;
+    };
+};
+
+let sandboxRowCounter = 0;
+
+/** Stands in for a PostgREST builder: chains like one, resolves without a request. */
+function sandboxQuery(table: string, op: SandboxWrite['op'], values: any) {
+    const filters: SandboxWrite['filters'] = [];
+    const incoming = Array.isArray(values) ? values : values == null ? [] : [values];
+    let wantsSingle = false;
+    let settled: Promise<any> | null = null;
+
+    const settle = () => {
+        if (!settled) {
+            // Callers routinely read the result back — `.insert(...).select().single()` and
+            // then `.id` is everywhere — so the write is echoed. An update keeps the id it
+            // was aimed at; an insert gets a fresh one, in the same `test-` namespace as the
+            // fixtures so it can never be mistaken for a real row.
+            const targetId = filters.find(f => f.column === 'id')?.value;
+            const rows = incoming.map(row => ({
+                id: op === 'insert' ? `test-${table}-${++sandboxRowCounter}` : targetId ?? `test-${table}-${++sandboxRowCounter}`,
+                ...row,
+            }));
+
+            sandboxSink?.({ table, op, values, filters, rows });
+            settled = Promise.resolve({
+                // A stored procedure returns whatever it likes; nothing is a safer answer
+                // than an echo of its arguments.
+                data: op === 'rpc' ? null : wantsSingle ? rows[0] ?? null : rows,
+                error: null,
+                count: rows.length,
+                status: 200,
+                statusText: 'OK (test sandbox)',
+            });
+        }
+        return settled;
+    };
+
+    const builder: any = new Proxy(
+        {},
+        {
+            get(_target, prop) {
+                if (prop === 'then') return (...args: any[]) => settle().then(...args);
+                if (prop === 'catch') return (...args: any[]) => settle().catch(...args);
+                if (prop === 'finally') return (...args: any[]) => settle().finally(...args);
+                if (prop === 'single' || prop === 'maybeSingle') {
+                    return () => {
+                        wantsSingle = true;
+                        return builder;
+                    };
+                }
+                // eq('id', x), match({...}) and friends: remembered, then chained past.
+                return (...args: any[]) => {
+                    if (typeof args[0] === 'string' && args.length >= 2) {
+                        filters.push({ column: args[0], value: args[1] });
+                    } else if (args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])) {
+                        Object.entries(args[0]).forEach(([column, value]) => filters.push({ column, value }));
+                    }
+                    return builder;
+                };
+            },
+        }
+    );
+
+    return builder;
+}
+
+const sandboxFrom = (table: string) =>
+    new Proxy(
+        {},
+        {
+            get(_target, prop) {
+                if (prop === 'insert' || prop === 'upsert') {
+                    return (values: any) => sandboxQuery(table, prop as 'insert' | 'upsert', values);
+                }
+                if (prop === 'update') return (values: any) => sandboxQuery(table, 'update', values);
+                if (prop === 'delete') return () => sandboxQuery(table, 'delete', undefined);
+
+                const real = liveClient.from(table) as any;
+                const value = real[prop];
+                return typeof value === 'function' ? value.bind(real) : value;
+            },
+        }
+    );
+
+// A stored procedure is opaque from here -- match_skills only reads, delete_user_account very
+// much does not -- so under /test they are all treated as writes and none of them run. Edge
+// functions likewise: the invite and confirmation ones send real email.
+const sandboxRpc = (fn: string, args?: any) => sandboxQuery(fn, 'rpc', args ? [args] : []);
+const sandboxFunctions = {
+    invoke: (fn: string, options?: any) => {
+        sandboxSink?.({ table: fn, op: 'invoke', values: options?.body, filters: [], rows: [] });
+        return Promise.resolve({ data: null, error: null });
+    },
+};
+
+/**
+ * The only client in the app, and it holds the anon key -- which is public by design and
+ * carries no authority of its own.
+ *
+ * There used to be a second one here on the service role key, for the admin invite endpoints.
+ * A `VITE_`-prefixed variable is inlined into the bundle at build time, so that key was being
+ * served to every visitor: it bypasses RLS, reads every table and can mint a session for any
+ * account. Those calls now go through the admin-invite Edge Function, which keeps the key on
+ * the server and checks the caller's role before it does anything. See src/lib/adminInvite.ts.
+ */
+export const supabase: typeof liveClient = new Proxy(liveClient, {
+    get(target, prop) {
+        if (inTestSandbox()) {
+            if (prop === 'from') return sandboxFrom;
+            if (prop === 'rpc') return sandboxRpc;
+            if (prop === 'functions') return sandboxFunctions;
+        }
+        const value = Reflect.get(target, prop);
+        // Bound to the real client: these are class methods reaching for private state, and
+        // handing them `this === proxy` breaks them.
+        return typeof value === 'function' ? value.bind(target) : value;
     },
 });

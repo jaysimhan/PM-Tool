@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Outlet, NavLink, Link, useNavigate } from 'react-router-dom';
+import { Outlet, NavLink, Link, useNavigate, useLocation } from 'react-router-dom';
 import { Building2, Users, Calendar, ClipboardList, BarChart3, Settings, Menu, Bell, FileText, Link as LinkIcon, LogOut, Shield, Sliders, GanttChart, UserPlus } from 'lucide-react';
 import { User, Notification as AppNotification } from '../types/types';
 import { supabase } from '../lib/supabaseClient';
@@ -8,6 +8,9 @@ import { Logo } from '../components/Logo';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { PreferencesModal } from '../components/PreferencesModal';
 import { DashboardIcon } from '../components/icons/DashboardIcon';
+import { MemberViewPicker } from '../components/MemberViewPicker';
+import { useMemberView } from '../contexts/MemberViewContext';
+import { useIsTestPath, toTestPath, TEST_PREFIX } from '../lib/testEnvironment';
 
 interface DashboardLayoutProps {
     currentUser: User;
@@ -27,6 +30,13 @@ function resolveNotificationLink(link: string): string {
 export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
     const { signOut } = useAuth();
     const navigate = useNavigate();
+    const { pathname } = useLocation();
+    // Once you are in the test environment the sidebar keeps you there — every page has a
+    // copy under /test — and the badge in the header is the way back out.
+    const inTestEnvironment = useIsTestPath();
+    const { enabled: memberViewEnabled } = useMemberView();
+    const navPath = (id: string) => (inTestEnvironment ? toTestPath(id) : `/${id}`);
+    const livePath = inTestEnvironment ? pathname.slice(TEST_PREFIX.length) || '/workload' : pathname;
     const [isMac, setIsMac] = useState(true);
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [showNotifications, setShowNotifications] = useState(false);
@@ -43,6 +53,12 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
     const unreadCount = notifications.filter(n => !n.isRead).length;
 
     const loadNotifications = useCallback(async () => {
+        // The test environment runs on invented data, and real notifications point at real
+        // tasks that do not exist there.
+        if (inTestEnvironment) {
+            setNotifications([]);
+            return;
+        }
         const { data, error } = await supabase
             .from('notifications')
             .select('id, type, title, message, link, is_read, created_at')
@@ -64,7 +80,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
             isRead: n.is_read === true,
             createdDate: n.created_at
         })));
-    }, [currentUser.id]);
+    }, [currentUser.id, inTestEnvironment]);
 
     // On arrival, and then at a pace that suits something nobody is waiting on. Opening the
     // bell refetches too, so the list is never stale at the moment it is actually read.
@@ -176,6 +192,19 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                             </button>
                             <Logo className="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0" />
                             <h1 className="text-xl font-semibold text-gray-900">WorkFlow Pro</h1>
+                            {/* The pages under /test are the same pages against the same data —
+                                only the unreleased bits are switched on — so say so plainly and
+                                keep the way back one click away. */}
+                            {inTestEnvironment && (
+                                <Link
+                                    to={livePath}
+                                    title="Leave the test environment"
+                                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700 text-xs font-semibold hover:bg-amber-100 transition-colors"
+                                >
+                                    Test environment
+                                    <span className="font-normal text-amber-600">· exit</span>
+                                </Link>
+                            )}
                         </div>
 
                         {/* Search Bar */}
@@ -185,6 +214,10 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
 
                         {/* User Profile + Logout */}
                         <div className="flex items-center gap-4">
+                            {/* Whose work every page below is showing. Only present where the
+                                member view is switched on, which today means /test. */}
+                            {memberViewEnabled && <MemberViewPicker />}
+
                             {/* Request Form Button */}
                             <Link
                                 to="/new-request"
@@ -297,7 +330,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                 </button>
                                 
                                 {showProfileMenu && (
-                                    <div className="absolute right-0 top-full mt-2 w-64 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50">
+                                    <div className="absolute right-0 top-full mt-2 min-w-[16rem] w-max max-w-md bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden z-50">
                                         <div className="p-5 border-b border-gray-100 flex flex-col gap-3">
                                             <div className="flex items-center gap-4">
                                                 {currentUser.avatar ? (
@@ -315,9 +348,9 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                                             : currentUser.name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase()}
                                                     </div>
                                                 )}
-                                                <div className="flex-1 min-w-0">
-                                                    <p className="font-semibold text-lg text-gray-900 truncate">{currentUser.name}</p>
-                                                    <p className="text-sm text-gray-500 truncate">{currentUser.email}</p>
+                                                <div className="flex-1 min-w-0 pr-4">
+                                                    <p className="font-semibold text-lg text-gray-900 break-words">{currentUser.name}</p>
+                                                    <p className="text-sm text-gray-500 break-all">{currentUser.email}</p>
                                                 </div>
                                             </div>
                                         </div>
@@ -373,7 +406,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                 return (
                                     <li key={item.id}>
                                         <NavLink
-                                            to={`/${item.id}`}
+                                            to={navPath(item.id)}
                                             title={!isSidebarOpen ? item.label : undefined}
                                             className={({ isActive }) => `w-full flex items-center overflow-hidden rounded-lg text-sm font-medium transition-colors ${isActive
                                                     ? 'bg-blue-50 text-blue-700'
@@ -398,7 +431,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                     {canInvite && (
                         <div className="p-4 border-t border-gray-200 flex-shrink-0">
                             <button
-                                onClick={() => navigate('/team-management', { state: { openInvite: true } })}
+                                onClick={() => navigate(navPath('team-management'), { state: { openInvite: true } })}
                                 title={!isSidebarOpen ? 'Invite Team Member' : undefined}
                                 className="w-full flex items-center overflow-hidden rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition-colors"
                             >

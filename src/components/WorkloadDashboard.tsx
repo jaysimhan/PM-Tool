@@ -11,6 +11,8 @@ import { calculateDailyCapacity, getDatesInRange, formatDate, getWorkloadColor, 
 import { Filter, Download, Calendar, List, LayoutGrid, GanttChart, ArrowUpDown } from 'lucide-react';
 import TaskDetailsPanel from './TaskDetailsPanel';
 import { TimelineContainer } from './TimelineContainer';
+import { useTestEnvironment } from '../lib/testEnvironment';
+import { useMemberFilter } from '../contexts/MemberViewContext';
 
 interface Props {
     currentUser: User;
@@ -43,6 +45,20 @@ export default function WorkloadDashboard({ currentUser }: Props) {
     const [hoveredCell, setHoveredCell] = useState<{ userId: string; date: string } | null>(null);
     const [clickedCell, setClickedCell] = useState<{ userId: string; date: string } | null>(null);
     const [viewMode, setViewMode] = useState<ViewMode>('calendar');
+    // The timeline is still being worked on, so it only exists in the test environment
+    // (/test/workload) and only for the super admin. Everywhere else the toggle is absent
+    // and the view cannot be reached.
+    const showTimeline = useTestEnvironment(currentUser);
+    // Whoever was picked in the header, or null for all members.
+    const memberFilter = useMemberFilter();
+    const viewModes: ViewMode[] = showTimeline
+        ? ['calendar', 'list', 'board', 'timeline']
+        : ['calendar', 'list', 'board'];
+    // Leaving the test environment while the timeline is up must not leave the page on a
+    // view it no longer offers — this component keeps its state across that navigation.
+    useEffect(() => {
+        if (!showTimeline) setViewMode(prev => (prev === 'timeline' ? 'calendar' : prev));
+    }, [showTimeline]);
     const [calendarView, setCalendarView] = useState<CalendarView>('week');
     const [showWeekends, setShowWeekends] = useState(false);
     const [showFilters, setShowFilters] = useState(false);
@@ -98,6 +114,11 @@ export default function WorkloadDashboard({ currentUser }: Props) {
 
     // Get team members based on selected team
     const teamMembers = useMemo(() => {
+        // One person picked in the header wins over the team selector: the grid, the stats
+        // and the board columns are all built from this list.
+        if (memberFilter) {
+            return users.filter(u => u.id === memberFilter);
+        }
         if (selectedTeamId === 'all') {
             const visibleTeamIds = visibleTeams.map(t => t.id);
             return users.filter(u =>
@@ -111,7 +132,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         // Same rule as the all-teams branch above: deactivated people are out of workload
         // planning, which is the whole point of deactivating them.
         return team ? users.filter(u => u.teamIds && u.teamIds.includes(selectedTeamId) && u.isActive) : [];
-    }, [selectedTeamId, visibleTeams, users, tasks, currentUser]);
+    }, [selectedTeamId, visibleTeams, users, tasks, currentUser, memberFilter]);
 
     // Calculate capacity for each user and date
     const capacityData = useMemo(() => {
@@ -181,6 +202,9 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         if (filterTag.length > 0) {
             filtered = filtered.filter(t => t.tags && t.tags.some(tag => filterTag.includes(tag.id)));
         }
+        if (memberFilter) {
+            filtered = filtered.filter(t => t.assignedToId === memberFilter);
+        }
 
         // Apply sorting for list view
         if (viewMode === 'list') {
@@ -218,7 +242,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         }
 
         return filtered;
-    }, [selectedTeamId, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, sortBy, sortDirection, viewMode]);
+    }, [selectedTeamId, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, memberFilter, sortBy, sortDirection, viewMode]);
 
     const handleTaskClick = (task: Task) => {
         setSelectedTask(task);
@@ -992,7 +1016,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
 
                         {/* View */}
                         <div className="flex items-center h-8 bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                            {(['calendar', 'list', 'board', 'timeline'] as ViewMode[]).map(key => (
+                            {viewModes.map(key => (
                                 <button key={key} title={key} onClick={() => setViewMode(key)}
                                     className={`w-7 h-full flex items-center justify-center rounded-md transition-all ${viewMode === key ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}>
                                     {ViewIcons[key as keyof typeof ViewIcons]}
@@ -1127,7 +1151,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                 {viewMode === 'calendar' && renderCalendarView()}
                 {viewMode === 'list' && renderListView()}
                 {viewMode === 'board' && renderBoardView()}
-                {viewMode === 'timeline' && renderTimelineView()}
+                {viewMode === 'timeline' && showTimeline && renderTimelineView()}
             </div>
 
             {/* Task Details Panel */}

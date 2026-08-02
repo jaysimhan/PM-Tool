@@ -3,7 +3,8 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { User, AccessRequest } from '../types/types';
 import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon, Edit2, Trash2, Shield, Copy, Loader2, Mail, Building2, Globe } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
-import { supabase, supabaseAdmin } from '../lib/supabaseClient';
+import { supabase } from '../lib/supabaseClient';
+import { inviteUser, sendSetupLink, type InviteResult } from '../lib/adminInvite';
 import toast from 'react-hot-toast';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { embedText } from '../utils/embeddings';
@@ -101,6 +102,7 @@ export default function TeamManagement({ currentUser }: Props) {
     const [showInviteMember, setShowInviteMember] = useState(false);
     const [inviteSearch, setInviteSearch] = useState('');
     const [selectedInvitees, setSelectedInvitees] = useState<User[]>([]);
+    const [removedActiveUsers, setRemovedActiveUsers] = useState<User[]>([]);
     const [showInviteDropdown, setShowInviteDropdown] = useState(false);
     const [inviteRole, setInviteRole] = useState('Editor');
     const [unassignedSearch, setUnassignedSearch] = useState('');
@@ -155,6 +157,7 @@ export default function TeamManagement({ currentUser }: Props) {
         setActionTeamId((ownTeam || sortedTeams[0]).id);
         setSelectedInvitees([]);
         setInviteSearch('');
+        setRemovedActiveUsers([]);
         setInviteHighlight(-1);
         setShowInviteDropdown(false);
         setShowInviteMember(true);
@@ -201,11 +204,10 @@ export default function TeamManagement({ currentUser }: Props) {
         return !q || u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q);
     };
 
-    // Existing people the invite box can offer: not already capsulized, not already on the
-    // target team. They still show while empty-typed so the list doubles as a people browser.
     const inviteSuggestions = useMemo(() => {
-        if (!showInviteMember) return [];
+        if (!showInviteMember || !inviteSearch.trim()) return [];
         return users
+            .filter(u => !u.isActive || u.deletedAt)
             .filter(u => !selectedInvitees.some(s => s.id === u.id))
             .filter(u => !actionTeam?.memberIds.includes(u.id))
             .filter(u => matchesQuery(u, inviteSearch))
@@ -301,33 +303,24 @@ export default function TeamManagement({ currentUser }: Props) {
     const inviteFromRequest = async (request: AccessRequest) => {
         setBusyRequestId(request.id);
         try {
-            const redirectTo = `${window.location.origin}/welcome`;
-            const inviteData = { name: request.name };
+            let result: InviteResult;
+            try {
+                result = await inviteUser({ email: request.email, name: request.name });
+            } catch (err) {
+                console.error('Error inviting from access request:', err);
+                toast.error(`Could not invite ${request.email}: ${err instanceof Error ? err.message : 'unknown error'}`);
+                return;
+            }
 
-            const { data, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(
-                request.email,
-                { redirectTo, data: inviteData }
-            );
-
-            if (!data?.user) {
-                // Supabase only sends invite email once custom SMTP is set up. Mint the same
-                // link so the admin can pass it on by hand rather than losing the invite.
-                console.error('Error sending invite email via Supabase:', inviteError);
-                const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-                    type: 'invite',
-                    email: request.email,
-                    options: { redirectTo, data: inviteData }
-                });
-                if (linkError || !linkData?.user) {
-                    toast.error(`Could not invite ${request.email}: ${inviteError?.message || linkError?.message || 'unknown error'}`);
-                    return;
-                }
-                if (linkData.properties?.action_link) {
-                    setRequestInviteLinks(prev => ({ ...prev, [request.id]: linkData.properties!.action_link! }));
-                    toast.success(`Invite created for ${request.email}. Copy the link below and send it on.`);
-                }
-            } else {
+            if (result.sent) {
                 toast.success(`Invite sent to ${request.email}.`);
+            } else if (result.actionLink) {
+                // Supabase only sends invite email once custom SMTP is set up; the function
+                // mints the same link instead so the admin can pass it on by hand.
+                setRequestInviteLinks(prev => ({ ...prev, [request.id]: result.actionLink! }));
+                toast.success(`Invite created for ${request.email}. Copy the link below and send it on.`);
+            } else {
+                toast.success(`Invite created for ${request.email}.`);
             }
 
             await resolveRequest(request.id, 'invited');
@@ -430,10 +423,13 @@ export default function TeamManagement({ currentUser }: Props) {
             toast.error('You are not allowed to assign that role.');
             return false;
         }
-        const { error } = await supabase.from('users').update({ role }).eq('id', userId);
+        // Through the function, not the table. users.role decides what a person may do, so
+        // the column is no longer writable by the client at all -- the checks above are the
+        // UI being helpful, and set_user_role is the same rules where they cannot be skipped.
+        const { error } = await supabase.rpc('set_user_role', { p_user_id: userId, p_role: role });
         if (error) {
             console.error('Error updating user role:', error);
-            toast.error('Error updating user role.');
+            toast.error(error.message || 'Error updating user role.');
             return false;
         }
         if (refreshUsers) await refreshUsers();
@@ -521,25 +517,37 @@ export default function TeamManagement({ currentUser }: Props) {
     const capsulizeEntries = (raw: string, current: User[]) => {
         const invitees = [...current];
         const leftover: string[] = [];
+        const activeRemoved: User[] = [];
         splitEntries(raw).forEach(entry => {
             const matchedUser = users.find(u => u.email.toLowerCase() === entry.toLowerCase() || u.name.toLowerCase() === entry.toLowerCase());
             const email = extractEmail(entry);
             if (matchedUser) {
-                if (!invitees.some(u => u.id === matchedUser.id)) invitees.push(matchedUser);
+                if (matchedUser.isActive && !matchedUser.deletedAt) {
+                    if (!activeRemoved.some(u => u.id === matchedUser.id)) activeRemoved.push(matchedUser);
+                } else {
+                    if (!invitees.some(u => u.id === matchedUser.id)) invitees.push(matchedUser);
+                }
             } else if (email) {
                 if (!invitees.some(u => u.email.toLowerCase() === email.toLowerCase())) invitees.push(makeTempInvitee(email));
             } else {
                 leftover.push(entry);
             }
         });
-        return { invitees, leftover: leftover.join(', ') };
+        return { invitees, leftover: leftover.join(', '), activeRemoved };
     };
 
     // Pull anything still sitting in the input into capsules (on paste, blur, Enter, send).
     const flushInviteInput = (raw: string, notifyInvalid = false) => {
-        const { invitees, leftover } = capsulizeEntries(raw, selectedInvitees);
+        const { invitees, leftover, activeRemoved } = capsulizeEntries(raw, selectedInvitees);
         setSelectedInvitees(invitees);
         setInviteSearch(leftover);
+        if (activeRemoved.length > 0) {
+            setRemovedActiveUsers(prev => {
+                const newArr = [...prev];
+                activeRemoved.forEach(u => { if (!newArr.some(existing => existing.id === u.id)) newArr.push(u); });
+                return newArr;
+            });
+        }
         if (leftover && notifyInvalid) toast.error(`"${leftover}" is not a valid email address.`);
         return { invitees, leftover };
     };
@@ -571,19 +579,14 @@ export default function TeamManagement({ currentUser }: Props) {
             if (needsResend) {
                 // Their auth identity already exists, so an invite would be rejected as a
                 // duplicate -- a magic link gets them back to the same setup screen.
-                const redirectTo = `${window.location.origin}/welcome`;
-                const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-                    type: 'magiclink',
-                    email: user.email,
-                    options: { redirectTo }
-                });
-
-                if (linkError || !linkData?.user) {
-                    toast.error(`Could not re-send setup link to ${user.email}: ${linkError?.message || 'Unknown error'}`);
+                try {
+                    const result = await sendSetupLink({ email: user.email });
+                    if (result.actionLink) {
+                        generatedLinks.push({ email: user.email, link: result.actionLink });
+                    }
+                } catch (err) {
+                    toast.error(`Could not re-send setup link to ${user.email}: ${err instanceof Error ? err.message : 'Unknown error'}`);
                     continue;
-                }
-                if (linkData.properties?.action_link) {
-                    generatedLinks.push({ email: user.email, link: linkData.properties.action_link });
                 }
 
                 successfulInvites++;
@@ -592,43 +595,43 @@ export default function TeamManagement({ currentUser }: Props) {
             }
 
             if (isNewInvite) {
-                // Lands them on account setup: password, then team and skills.
-                const redirectTo = `${window.location.origin}/welcome`;
-                // The team rides along in user_metadata rather than going into team_members
-                // now: that table's user_id references public.users, and an invitee has no
-                // row there until onboarding creates one. Onboarding applies it from here.
-                const inviteData = { name: user.name, team_id: actionTeam.id };
-
-                const { data, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(user.email, {
-                    redirectTo,
-                    data: inviteData
-                });
-
-                if (!data?.user) {
-                    // Supabase can only send once custom SMTP is configured. Until then, mint
-                    // the same invite link so the admin can pass it on by hand.
-                    console.error('Error sending invite email via Supabase:', inviteError);
-                    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-                        type: 'invite',
+                // Lands them on account setup: password, then team and skills. The team rides
+                // along in user_metadata rather than going into team_members now: that table's
+                // user_id references public.users, and an invitee has no row there until
+                // onboarding creates one. Onboarding applies it from there.
+                try {
+                    const result = await inviteUser({
                         email: user.email,
-                        options: { redirectTo, data: inviteData }
+                        name: user.name,
+                        teamId: actionTeam.id,
                     });
 
-                    if (linkError || !linkData?.user) {
-                        const errorMsg = inviteError?.message || linkError?.message
-                            || `Status ${inviteError?.status || 'Unknown'} - Please check your Supabase settings.`;
-                        toast.error(`Failed to invite ${user.email}: ${errorMsg}`);
-                        continue;
+                    // Supabase can only send once custom SMTP is configured. Until then the
+                    // function mints the same link for the admin to pass on by hand.
+                    if (!result.sent && result.actionLink) {
+                        generatedLinks.push({ email: user.email, link: result.actionLink });
                     }
-
-                    if (linkData.properties?.action_link) {
-                        generatedLinks.push({ email: user.email, link: linkData.properties.action_link });
-                    }
+                } catch (err) {
+                    toast.error(`Failed to invite ${user.email}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+                    continue;
                 }
 
                 successfulInvites++;
                 invitedEmails.push(user.email);
                 continue;
+            }
+
+            if (existingUser && (!existingUser.isActive || existingUser.deletedAt)) {
+                // Inactive user, reactivate them first
+                const { error: activeError } = await supabase.rpc('set_user_active', {
+                    p_user_id: user.id,
+                    p_active: true
+                });
+                if (activeError) {
+                    console.error('Error reactivating user:', activeError);
+                    toast.error(`Could not reactivate ${user.name}.`);
+                    continue;
+                }
             }
 
             // Existing users are fully set up already, so they join the team right away.
@@ -676,8 +679,10 @@ export default function TeamManagement({ currentUser }: Props) {
         }
 
         await refreshTeams();
+        if (refreshUsers) await refreshUsers();
         setShowInviteMember(false);
         setSelectedInvitees([]);
+        setRemovedActiveUsers([]);
         setInviteSearch('');
     };
 
@@ -1412,24 +1417,35 @@ export default function TeamManagement({ currentUser }: Props) {
                                 className={`border ${selectedInvitees.length > 0 ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500'} rounded flex flex-wrap items-start p-1.5 transition-colors`}
                             >
                                 <div className="flex flex-wrap gap-1.5 flex-1 items-center min-w-[200px]">
-                                    {selectedInvitees.map(user => (
-                                        <div key={user.id} className="flex items-center gap-1.5 bg-white border border-gray-300 rounded-full px-1 py-0.5">
-                                            <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center text-xs font-medium text-blue-700">
-                                                {user.name.split(' ').map(n => n[0]).join('')}
-                                            </div>
-                                            <span className="text-sm text-gray-800 whitespace-nowrap">{user.name}</span>
-                                            <button 
-                                                onClick={() => setSelectedInvitees(selectedInvitees.filter(u => u.id !== user.id))} 
-                                                className="p-0.5 hover:bg-gray-200 rounded-full mr-0.5"
+                                    {selectedInvitees.map(user => {
+                                        const isInactive = !user.id.startsWith('temp-') && (!user.isActive || user.deletedAt);
+                                        return (
+                                            <div 
+                                                key={user.id} 
+                                                className={`flex items-center gap-1.5 bg-white border rounded-full px-1 py-0.5 relative group ${isInactive ? 'border-orange-400' : 'border-gray-300'}`}
                                             >
-                                                <X className="w-3.5 h-3.5 text-gray-600" />
-                                            </button>
-                                        </div>
-                                    ))}
+                                                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium ${isInactive ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'}`}>
+                                                    {user.name.split(' ').map(n => n[0]).join('')}
+                                                </div>
+                                                <span className={`text-sm whitespace-nowrap ${isInactive ? 'text-orange-800' : 'text-gray-800'}`}>{user.name}</span>
+                                                <button 
+                                                    onClick={() => setSelectedInvitees(selectedInvitees.filter(u => u.id !== user.id))} 
+                                                    className="p-0.5 hover:bg-gray-200 rounded-full mr-0.5"
+                                                >
+                                                    <X className="w-3.5 h-3.5 text-gray-600" />
+                                                </button>
+                                                {isInactive && (
+                                                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 bg-gray-800 text-white text-xs font-medium rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10">
+                                                        Inactive user - Will be reactivated
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
                                     <input
                                         type="text"
                                         autoFocus
-                                        placeholder={selectedInvitees.length === 0 ? "Search people or type an email" : ""}
+                                        placeholder={selectedInvitees.length === 0 ? "Type or paste email addresses" : ""}
                                         value={inviteSearch}
                                         onFocus={() => setShowInviteDropdown(true)}
                                         onChange={(e) => {
@@ -1515,6 +1531,12 @@ export default function TeamManagement({ currentUser }: Props) {
                                 </div>
                             )}
                         </div>
+
+                        {removedActiveUsers.length > 0 && (
+                            <div className="mt-2 text-sm text-orange-600 bg-orange-50 p-2 rounded">
+                                Already existing active users were removed: {removedActiveUsers.map(u => u.name || u.email).join(', ')}
+                            </div>
+                        )}
 
                         {selectedInvitees.length > 0 ? (
                             <div className="flex flex-col mt-6">

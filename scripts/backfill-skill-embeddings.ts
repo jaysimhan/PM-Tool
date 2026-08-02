@@ -5,7 +5,10 @@ import { embedText } from '../src/utils/embeddings';
 dotenv.config();
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.VITE_SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+// No VITE_ prefix, and no falling back to the anon key: prefixed variables are inlined into
+// the browser bundle by any build that references them, and the anon key can no longer write
+// to skills in any case -- a silent fallback would just fail halfway through the backfill.
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     console.error('Missing Supabase credentials in .env');

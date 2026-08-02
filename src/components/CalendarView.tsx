@@ -1,12 +1,14 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { User, Task } from '../types/types';
+import { User, Task, TaskStatus } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { ChevronLeft, ChevronRight, ChevronDown, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
 import { getDatesInRange, getPriorityColor, getTimelineColumns, getProjectTimelineBounds, getStatusBadgeColor, formatStatusLabel } from '../utils/capacityCalculations';
 import TaskDetailsPanel from './TaskDetailsPanel';
 import TimelineView from './TimelineView';
 import { TimelineContainer } from './TimelineContainer';
+import { useTestEnvironment } from '../lib/testEnvironment';
+import { useMemberFilter } from '../contexts/MemberViewContext';
 import { getTagStyle } from '../utils/colors';
 import {
     Priority, Status, Brand,
@@ -17,20 +19,50 @@ interface Props {
   currentUser: User;
 }
 
+// The grid is built from local dates, so a cell has to be identified by the date it prints
+// rather than by toISOString(), which rolls a local midnight back a day east of UTC.
+const toDateKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+// Task dates arrive either as a plain date or as a UTC timestamp for that date's midnight;
+// both name the day in their first ten characters, and reading the timestamp form through a
+// local Date is exactly what would shift a task off the cell it belongs to.
+const taskDateKey = (value: string) =>
+  /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : toDateKey(new Date(value));
+
 type CalendarView = 'month' | 'week' | 'day';
 type TaskPageMode = 'calendar' | 'list' | 'board' | 'timeline';
 type SortOption = 'dueDate' | 'priority' | 'assignee' | 'status' | 'hours' | 'employee';
 
+// The filters global search can hand over in the URL, in the order they are read below.
+const FACET_PARAMS = ['assignee', 'brand', 'region', 'tag', 'skill'] as const;
+
 export default function CalendarView({ currentUser }: Props) {
-  const { users, teams, tasks, clients, regions, allTags, workCategories, loading } = useData();
+  const { users, teams, tasks, clients, regions, allTags, skills, workCategories, loading } = useData();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [currentDate, setCurrentDate] = useState(new Date('2026-07-28'));
   const [pageMode, setPageMode] = useState<TaskPageMode>('list');
+  // Still unfinished, so it lives only in the test environment (/test/tasks) and only for
+  // the super admin. Everyone else gets calendar/list/board and no way to the timeline.
+  const showTimeline = useTestEnvironment(currentUser);
+  // 'All members' (null) unless somebody has been picked in the header.
+  const memberFilter = useMemberFilter();
+  const pageModes: TaskPageMode[] = showTimeline
+    ? ['calendar', 'list', 'board', 'timeline']
+    : ['calendar', 'list', 'board'];
+  // This component survives the /test/tasks -> /tasks navigation, so the view it is sitting
+  // on has to come back inside the offered set when the test environment is left.
+  useEffect(() => {
+    if (!showTimeline) setPageMode(prev => (prev === 'timeline' ? 'list' : prev));
+  }, [showTimeline]);
   const [viewMode, setViewMode] = useState<CalendarView>('month');
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
 
-  const handleNewTask = () => {
+  // A blank task for the details panel to open on. Whatever the click already implies — the
+  // day cell in the calendar, the column on the board — is passed in so the panel opens with
+  // it filled instead of making someone re-enter what they just clicked.
+  const handleNewTask = (overrides: Partial<Task> = {}) => {
     const blankTask: Task = {
       id: `new-${Date.now()}`,
       requestId: '',
@@ -50,10 +82,16 @@ export default function CalendarView({ currentUser }: Props) {
       dependencyIds: [],
       linkedTaskIds: [],
       tags: [],
-      isSubtask: false
+      isSubtask: false,
+      ...overrides
     };
     setSelectedTask(blankTask);
     setIsTaskPanelOpen(true);
+  };
+
+  const handleNewTaskOnDate = (day: Date) => {
+    const date = toDateKey(day);
+    handleNewTask({ proposedStartDate: date, proposedEndDate: date, dueDate: date });
   };
 
   const toggleTaskExpansion = (taskId: string, e: React.MouseEvent) => {
@@ -77,6 +115,8 @@ export default function CalendarView({ currentUser }: Props) {
   const [filterBrand, setFilterBrand] = useState<string[]>([]);
   const [filterRegion, setFilterRegion] = useState<string[]>([]);
   const [filterTag, setFilterTag] = useState<string[]>([]);
+  const [filterAssignee, setFilterAssignee] = useState<string[]>([]);
+  const [filterSkill, setFilterSkill] = useState<string[]>([]);
 
   // Visible teams based on user role
   const visibleTeams = useMemo(() => {
@@ -119,6 +159,17 @@ export default function CalendarView({ currentUser }: Props) {
     if (filterTag.length > 0) {
       filtered = filtered.filter(t => t.tags && t.tags.some(tag => filterTag.includes(tag.id)));
     }
+    if (filterAssignee.length > 0) {
+      filtered = filtered.filter(t => t.assignedToId && filterAssignee.includes(t.assignedToId));
+    }
+    if (filterSkill.length > 0) {
+      filtered = filtered.filter(t => t.requiredSkillIds && t.requiredSkillIds.some(id => filterSkill.includes(id)));
+    }
+    // The member picked in the header. It narrows on top of the page's own filters rather
+    // than replacing them, so a status filter still applies to the person being looked at.
+    if (memberFilter) {
+      filtered = filtered.filter(t => t.assignedToId === memberFilter);
+    }
 
     if (pageMode === 'list') {
       filtered.sort((a, b) => {
@@ -149,7 +200,7 @@ export default function CalendarView({ currentUser }: Props) {
     }
 
     return filtered;
-  }, [filterTeam, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, pageMode, sortBy, sortDirection, tasks, visibleTeams, users, currentUser]);
+  }, [filterTeam, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, filterAssignee, filterSkill, pageMode, sortBy, sortDirection, tasks, visibleTeams, users, currentUser]);
 
   const handleTaskClick = (task: Task) => {
     setSelectedTask(task);
@@ -188,6 +239,42 @@ export default function CalendarView({ currentUser }: Props) {
       }, { replace: true });
     }
   }, [deepLinkTaskId, tasks, loading, setSearchParams]);
+
+  // A global-search hit that is not a task arrives as /tasks?assignee=<id> — or ?brand=,
+  // ?region=, ?tag= — and seeds the matching filter, so the page opens on exactly the slice
+  // that was searched for. Like ?task=, these are a way in rather than a mirror of the filter
+  // state: they are consumed once and dropped, since a parameter that outlived the arrival
+  // would fight every later click in the filter panel.
+  const linkedFacets = FACET_PARAMS.map(key => searchParams.get(key)).join('|');
+  useEffect(() => {
+    const [assignee, brand, region, tag, skill] = FACET_PARAMS.map(key => searchParams.get(key));
+    if (!assignee && !brand && !region && !tag && !skill) return;
+
+    // Searching for something means "show me this", so whatever was filtered before is
+    // replaced rather than intersected with it — an old brand filter left standing would
+    // quietly empty the very list the search was meant to open.
+    setFilterTeam('all');
+    setFilterPriority([]);
+    setFilterStatus([]);
+    setFilterAssignee(assignee ? [assignee] : []);
+    setFilterBrand(brand ? [brand] : []);
+    setFilterRegion(region ? [region] : []);
+    setFilterTag(tag ? [tag] : []);
+    setFilterSkill(skill ? [skill] : []);
+    // The filters are shown rather than merely applied: arriving on a silently narrowed list
+    // with no sign of why is worse than not filtering at all. The calendar can hide the whole
+    // result set behind the month it happens to be on, so the list is where these land.
+    setShowFilters(true);
+    setPageMode(prev => (prev === 'calendar' ? 'list' : prev));
+
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      FACET_PARAMS.forEach(key => next.delete(key));
+      return next;
+    }, { replace: true });
+    // searchParams is read through linkedFacets, which is what actually changes here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedFacets, setSearchParams]);
 
   // Closing the panel has to clear the parameter too, otherwise the URL still names the task
   // and clicking the same notification again would be a no-op.
@@ -254,11 +341,11 @@ export default function CalendarView({ currentUser }: Props) {
 
   // Get tasks for a specific date
   const getTasksForDate = (date: Date) => {
-    const dateStr = date.toISOString().split('T')[0];
+    const dateStr = toDateKey(date);
     return filteredTasks.filter(task => {
       if (!task.proposedStartDate || !task.dueDate) return false;
-      const startDate = new Date(task.proposedStartDate).toISOString().split('T')[0];
-      const endDate = new Date(task.dueDate).toISOString().split('T')[0];
+      const startDate = taskDateKey(task.proposedStartDate);
+      const endDate = taskDateKey(task.dueDate);
       return dateStr >= startDate && dateStr <= endDate;
     });
   };
@@ -322,18 +409,23 @@ export default function CalendarView({ currentUser }: Props) {
             return (
               <div
                 key={index}
-                className={`min-h-[120px] border-r border-b border-gray-200 p-2 ${
+                onClick={() => handleNewTaskOnDate(day)}
+                title={`New task on ${day.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`}
+                className={`group min-h-[120px] border-r border-b border-gray-200 p-2 cursor-pointer ${
                   !isCurrentMonth ? 'bg-gray-50' : 'bg-white'
                 } hover:bg-blue-50 transition-colors`}
               >
-                <div className={`text-sm font-medium mb-2 ${
-                  isToday 
-                    ? 'bg-blue-600 text-white w-7 h-7 rounded-full flex items-center justify-center' 
-                    : isCurrentMonth 
-                    ? 'text-gray-900' 
-                    : 'text-gray-400'
-                }`}>
-                  {day.getDate()}
+                <div className="flex items-start justify-between mb-2">
+                  <div className={`text-sm font-medium ${
+                    isToday
+                      ? 'bg-blue-600 text-white w-7 h-7 rounded-full flex items-center justify-center'
+                      : isCurrentMonth
+                      ? 'text-gray-900'
+                      : 'text-gray-400'
+                  }`}>
+                    {day.getDate()}
+                  </div>
+                  <Plus className="w-4 h-4 text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
 
                 <div className="space-y-1">
@@ -344,9 +436,9 @@ export default function CalendarView({ currentUser }: Props) {
                     return (
                       <div
                         key={task.id}
-                        onClick={() => handleTaskClick(task)}
+                        onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
                         className="text-xs p-1.5 rounded cursor-pointer hover:shadow-sm transition-shadow"
-                        style={{ 
+                        style={{
                           backgroundColor: userTeam?.color ? `${userTeam.color}20` : '#E5E7EB',
                           borderLeft: `3px solid ${userTeam?.color || '#9CA3AF'}`
                         }}
@@ -365,7 +457,10 @@ export default function CalendarView({ currentUser }: Props) {
                     );
                   })}
                   {dayTasks.length > 3 && (
-                    <div className="text-[10px] text-gray-500 text-center">
+                    <div
+                      onClick={e => { e.stopPropagation(); setViewMode('day'); setCurrentDate(day); }}
+                      className="text-[10px] text-gray-500 text-center hover:text-blue-600"
+                    >
                       +{dayTasks.length - 3} more
                     </div>
                   )}
@@ -408,7 +503,12 @@ export default function CalendarView({ currentUser }: Props) {
             const dayTasks = getTasksForDate(day);
 
             return (
-              <div key={index} className="min-h-[400px] border-r border-gray-200 last:border-r-0 p-3">
+              <div
+                key={index}
+                onClick={() => handleNewTaskOnDate(day)}
+                title={`New task on ${day.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`}
+                className="group min-h-[400px] border-r border-gray-200 last:border-r-0 p-3 cursor-pointer hover:bg-blue-50/40 transition-colors"
+              >
                 <div className="space-y-2">
                   {dayTasks.map(task => {
                     const assignedUser = task.assignedToId ? users.find(u => u.id === task.assignedToId) : null;
@@ -417,7 +517,7 @@ export default function CalendarView({ currentUser }: Props) {
                     return (
                       <div
                         key={task.id}
-                        onClick={() => handleTaskClick(task)}
+                        onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
                         className="text-xs p-2 rounded cursor-pointer hover:shadow-md transition-shadow"
                         style={{ 
                           backgroundColor: userTeam?.color ? `${userTeam.color}20` : '#E5E7EB',
@@ -434,6 +534,11 @@ export default function CalendarView({ currentUser }: Props) {
                       </div>
                     );
                   })}
+
+                  <div className="flex items-center gap-1 text-xs text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity px-1">
+                    <Plus className="w-3.5 h-3.5" />
+                    New task
+                  </div>
                 </div>
               </div>
             );
@@ -459,17 +564,29 @@ export default function CalendarView({ currentUser }: Props) {
                 {currentDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
               </div>
             </div>
-            <div className="text-sm text-gray-600">
-              {dayTasks.length} {dayTasks.length === 1 ? 'task' : 'tasks'}
+            <div className="flex items-center gap-4">
+              <div className="text-sm text-gray-600">
+                {dayTasks.length} {dayTasks.length === 1 ? 'task' : 'tasks'}
+              </div>
+              <button
+                onClick={() => handleNewTaskOnDate(currentDate)}
+                className="h-8 px-3 border border-gray-300 bg-white rounded-lg text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-blue-300 hover:text-blue-600 flex items-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                New task
+              </button>
             </div>
           </div>
         </div>
 
         <div className="p-6 space-y-3">
           {dayTasks.length === 0 ? (
-            <div className="text-center py-12">
+            <div
+              onClick={() => handleNewTaskOnDate(currentDate)}
+              className="text-center py-12 rounded-lg border border-dashed border-gray-200 cursor-pointer hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
+            >
               <div className="text-gray-400 text-lg mb-2">No tasks scheduled</div>
-              <div className="text-sm text-gray-500">This day is free</div>
+              <div className="text-sm text-gray-500">Click to add a task to this day</div>
             </div>
           ) : (
             dayTasks.map(task => {
@@ -705,9 +822,12 @@ export default function CalendarView({ currentUser }: Props) {
   };
 
   const renderBoardView = () => {
-      const statusColumns = [
+      // 'pending' is a legacy status no task carries any more, so the column it used to fill
+      // stood permanently empty — and a click-to-add on it would have created a task the
+      // column could never show. 'awaiting_assignment' is what "pending" means now.
+      const statusColumns: { status: TaskStatus; label: string; color: string }[] = [
           { status: 'scheduled', label: 'Scheduled', color: 'bg-purple-100' },
-          { status: 'pending', label: 'Pending', color: 'bg-gray-100' },
+          { status: 'awaiting_assignment', label: 'Pending', color: 'bg-gray-100' },
           { status: 'awaiting_employee_approval', label: 'Awaiting Approval', color: 'bg-yellow-100' },
           { status: 'in_progress', label: 'In Progress', color: 'bg-blue-100' },
           { status: 'manager_review_required', label: 'Review', color: 'bg-orange-100' },
@@ -721,13 +841,25 @@ export default function CalendarView({ currentUser }: Props) {
                       const columnTasks = activeTasks.filter(t => t.status === column.status);
 
                       return (
-                          <div key={column.status} className="space-y-3 w-72 flex-shrink-0">
+                          <div key={column.status} className="group space-y-3 w-72 flex-shrink-0">
                               <div className="flex items-center justify-between">
                                   <h3 className="text-sm font-semibold text-gray-900">{column.label}</h3>
-                                  <span className="text-xs text-gray-500">{columnTasks.length}</span>
+                                  <div className="flex items-center gap-1.5">
+                                      <span className="text-xs text-gray-500">{columnTasks.length}</span>
+                                      <button
+                                          onClick={() => handleNewTask({ status: column.status })}
+                                          title={`New task in ${column.label}`}
+                                          className="p-0.5 rounded text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-gray-100 hover:text-blue-600 transition-all"
+                                      >
+                                          <Plus className="w-4 h-4" />
+                                      </button>
+                                  </div>
                               </div>
 
-                              <div className="space-y-2 min-h-[400px]">
+                              <div
+                                  onClick={() => handleNewTask({ status: column.status })}
+                                  className="space-y-2 min-h-[400px] cursor-pointer"
+                              >
                                   {columnTasks.map(task => {
                                       const assignedUser = task.assignedToId ? users.find(u => u.id === task.assignedToId) : null;
                                       const userTeam = assignedUser ? getUserTeam(assignedUser.id) : null;
@@ -735,7 +867,7 @@ export default function CalendarView({ currentUser }: Props) {
                                       return (
                                           <div
                                               key={task.id}
-                                              onClick={() => handleTaskClick(task)}
+                                              onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
                                               className={`${column.color} border border-gray-200 rounded-lg p-3 cursor-pointer hover:shadow-md transition-shadow`}
                                           >
                                               <div className="flex items-start gap-2 mb-2">
@@ -767,6 +899,11 @@ export default function CalendarView({ currentUser }: Props) {
                                           </div>
                                       );
                                   })}
+
+                                  <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-dashed border-gray-200 text-xs text-gray-400 opacity-0 group-hover:opacity-100 hover:border-blue-300 hover:text-blue-600 transition-all">
+                                      <Plus className="w-3.5 h-3.5" />
+                                      New task
+                                  </div>
                               </div>
                           </div>
                       );
@@ -778,7 +915,7 @@ export default function CalendarView({ currentUser }: Props) {
   const PRIORITIES: Priority[] = ['urgent', 'high', 'normal', 'low'];
   const STATUSES: string[] = ['new_request', 'in_progress', 'scheduled', 'accepted', 'in_review', 'on_hold', 'completed', 'cancelled'];
 
-  const activeCount = filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length;
+  const activeCount = filterPriority.length + filterStatus.length + filterBrand.length + filterRegion.length + filterTag.length + filterAssignee.length + filterSkill.length;
 
 
   const kpis = [
@@ -867,15 +1004,15 @@ export default function CalendarView({ currentUser }: Props) {
 
                     {/* View */}
                     <div className="flex items-center h-8 bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                        {(['calendar', 'list', 'board', 'timeline'] as TaskPageMode[]).map(key => (
+                        {pageModes.map(key => (
                             <button key={key} title={key} onClick={() => setPageMode(key)}
                                 className={`w-7 h-full flex items-center justify-center rounded-md transition-all ${pageMode === key ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}>
                                 {ViewIcons[key as keyof typeof ViewIcons]}
                             </button>
                         ))}
                     </div>
-                    <button 
-                        onClick={handleNewTask}
+                    <button
+                        onClick={() => handleNewTask()}
                         className="h-8 px-3 ml-2 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 flex items-center gap-1.5 transition-colors"
                     >
                         <Plus className="w-4 h-4" />
@@ -970,6 +1107,61 @@ export default function CalendarView({ currentUser }: Props) {
                         </div>
                     </div>
 
+                    {/* Assignee and tag have no pill row of their own — one per person and one
+                        per tag would swamp the panel — so they appear only once something has
+                        set them, which today means arriving from global search. Showing the
+                        chip is what makes that filter visible and undoable. */}
+                    {filterAssignee.length > 0 && (
+                        <>
+                            <div className="w-px self-stretch bg-gray-100 shrink-0" />
+                            <div className="flex flex-col gap-2">
+                                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Assignee</span>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                    {filterAssignee.map(id => (
+                                        <Pill key={id} label={users.find(u => u.id === id)?.name || 'Unknown'} color="#2563eb" active
+                                            onClick={() => setFilterAssignee(filterAssignee.filter(x => x !== id))}
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {filterSkill.length > 0 && (
+                        <>
+                            <div className="w-px self-stretch bg-gray-100 shrink-0" />
+                            <div className="flex flex-col gap-2">
+                                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Skill</span>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                    {filterSkill.map(id => (
+                                        <Pill key={id} label={skills.find(s => s.id === id)?.name || 'Unknown'} color="#7c3aed" active
+                                            onClick={() => setFilterSkill(filterSkill.filter(x => x !== id))}
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {filterTag.length > 0 && (
+                        <>
+                            <div className="w-px self-stretch bg-gray-100 shrink-0" />
+                            <div className="flex flex-col gap-2">
+                                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">Tag</span>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                    {filterTag.map(id => {
+                                        const tag = allTags.find(t => t.id === id);
+                                        return (
+                                            <Pill key={id} label={tag?.name || 'Unknown'} color={tag?.color || '#475569'} active
+                                                onClick={() => setFilterTag(filterTag.filter(x => x !== id))}
+                                            />
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </>
+                    )}
+
                     {activeCount > 0 && (
                         <>
                             <div className="w-px self-stretch bg-gray-100 shrink-0" />
@@ -982,6 +1174,8 @@ export default function CalendarView({ currentUser }: Props) {
                                     setFilterBrand([]);
                                     setFilterRegion([]);
                                     setFilterTag([]);
+                                    setFilterAssignee([]);
+                                    setFilterSkill([]);
                                 }}
                                     className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md text-xs font-medium text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-all border border-transparent hover:border-gray-200">
                                     <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
@@ -1073,7 +1267,7 @@ export default function CalendarView({ currentUser }: Props) {
       {/* Render Main Views */}
       {pageMode === 'list' && renderListView()}
       {pageMode === 'board' && renderBoardView()}
-      {pageMode === 'timeline' && renderTimelineView()}
+      {pageMode === 'timeline' && showTimeline && renderTimelineView()}
       
       {/* Render Calendar Views */}
       {pageMode === 'calendar' && viewMode === 'month' && renderMonthView()}

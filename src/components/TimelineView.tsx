@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabaseClient';
 import { useData } from '../contexts/DataContext';
 import { getDatesInRange } from '../utils/capacityCalculations';
 import { TimelineContainer } from './TimelineContainer';
+import { useMemberFilter } from '../contexts/MemberViewContext';
 import { ChevronRight, ChevronDown, User as UserIcon, ZoomIn, ZoomOut, Search } from 'lucide-react';
 import { getPriorityColor } from '../utils/capacityCalculations';
 
@@ -15,6 +16,7 @@ type ZoomLevel = 'days' | 'weeks' | 'months';
 
 export default function TimelineView({ currentUser }: Props) {
     const { users, tasks, refreshTasks } = useData();
+    const memberFilter = useMemberFilter();
     const [zoom, setZoom] = useState<ZoomLevel>('days');
     const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
     const [startDate, setStartDate] = useState(() => {
@@ -37,12 +39,14 @@ export default function TimelineView({ currentUser }: Props) {
             if (t.status === 'completed' || t.status === 'cancelled') return;
             if (t.proposedStartDate && t.proposedEndDate) {
                 s.push(t);
-            } else {
+            } else if (!memberFilter || !t.assignedToId || t.assignedToId === memberFilter) {
+                // While one member is in view, the backlog on the left is what could go to
+                // them: their own unscheduled work, plus anything nobody has taken.
                 u.push(t);
             }
         });
         return { scheduled: s, unscheduled: u };
-    }, [tasks]);
+    }, [tasks, memberFilter]);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const [taskPositions, setTaskPositions] = useState<Record<string, { x: number, y: number, width: number, height: number }>>({});
@@ -73,7 +77,7 @@ export default function TimelineView({ currentUser }: Props) {
     const tasksByAssignee = useMemo(() => {
         const grouped: Record<string, Task[]> = { 'unassigned': [] };
         users.forEach(u => grouped[u.id] = []);
-        
+
         scheduled.forEach(t => {
             if (t.isSubtask) return; // Handle subtasks separately if needed
             if (t.assignedToId && grouped[t.assignedToId]) {
@@ -84,6 +88,21 @@ export default function TimelineView({ currentUser }: Props) {
         });
         return grouped;
     }, [scheduled, users]);
+
+    // The rows to draw, in the order they appear. With a member picked in the header it is
+    // just them; on "All members" it is everybody, including people with nothing scheduled --
+    // an empty lane is the point of a capacity view, not noise to be hidden.
+    const rows = useMemo(() => {
+        const named = users
+            .filter(u => u.isActive && !u.deletedAt && u.role !== 'requester')
+            .filter(u => !memberFilter || u.id === memberFilter)
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map(u => ({ id: u.id, name: u.name, tasks: tasksByAssignee[u.id] || [] }));
+
+        if (memberFilter) return named;
+        // Unassigned work has nowhere else to go, so it keeps its lane at the bottom.
+        return [...named, { id: 'unassigned', name: 'Unassigned', tasks: tasksByAssignee['unassigned'] || [] }];
+    }, [users, tasksByAssignee, memberFilter]);
 
     // HTML5 Drag and Drop handlers
     const handleDragStart = (e: React.DragEvent, taskId: string, dragType: 'unscheduled' | 'scheduled') => {
@@ -229,13 +248,10 @@ export default function TimelineView({ currentUser }: Props) {
                                 </tr>
                             </thead>
                             <tbody className="bg-white relative">
-                                {Object.entries(tasksByAssignee).map(([assigneeId, userTasks]) => {
-                                    if (userTasks.length === 0 && assigneeId !== 'unassigned') return null;
-                                    // if it's unassigned and no tasks, skip
-                                    if (userTasks.length === 0 && assigneeId === 'unassigned') return null;
-
-                                    const user = users.find(u => u.id === assigneeId);
-                                    const name = user ? user.name : 'Unassigned';
+                                {rows.map(({ id: assigneeId, name, tasks: userTasks }) => {
+                                    // The unassigned lane only earns its row when something
+                                    // is actually sitting in it.
+                                    if (assigneeId === 'unassigned' && userTasks.length === 0) return null;
 
                                     return (
                                         <React.Fragment key={assigneeId}>
@@ -252,6 +268,28 @@ export default function TimelineView({ currentUser }: Props) {
                                                     ></td>
                                                 ))}
                                             </tr>
+                                            {userTasks.length === 0 && (
+                                                // Somebody with a clear diary. The lane still
+                                                // takes a drop, which is how work gets given
+                                                // to them from the unscheduled list.
+                                                <tr className="h-10">
+                                                    <td className="w-64 min-w-[256px] sticky left-0 z-20 bg-white border-r border-b border-gray-200 px-4 py-1 text-sm text-gray-400 italic">
+                                                        No scheduled work
+                                                    </td>
+                                                    <td colSpan={dates.length} className="border-r border-b border-gray-200 p-0 relative">
+                                                        <div className="absolute inset-0 flex">
+                                                            {dates.map((d, i) => (
+                                                                <div
+                                                                    key={i}
+                                                                    className="flex-1 border-r border-gray-100/50"
+                                                                    onDragOver={handleDragOver}
+                                                                    onDrop={(e) => handleDrop(e, d, assigneeId)}
+                                                                />
+                                                            ))}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
                                             {userTasks.map(task => {
                                                 return (
                                                     <tr key={task.id} className="hover:bg-gray-50/50 group h-10">
