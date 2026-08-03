@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { User as SupabaseUser, Session } from '@supabase/supabase-js';
 import { supabase, sessionPersistenceExpired, clearSessionPersistence } from '../lib/supabaseClient';
 import { User } from '../types/types';
@@ -74,6 +74,37 @@ export const saveUserClients = (userId: string, clientIds: string[]) =>
 export const saveUserRegions = (userId: string, regionIds: string[]) =>
     saveUserLinks('user_regions', 'region_id', userId, regionIds);
 
+/**
+ * True unless the account behind the session in hand has been deleted.
+ *
+ * A JWT keeps working after its user is gone: it is signed, unexpired and parses fine, so
+ * getSession() hands it back and the app carries on as somebody who no longer exists. Nothing
+ * shows until a write is attempted, and then GoTrue answers "User from sub claim in JWT does not
+ * exist" -- which arrives at whichever form was submitted, so the screen reports it as a failure
+ * to save rather than as a session that has to end. Onboarding is where it hurt: an invitee whose
+ * first account was deleted and who was then re-invited still held the first session, and every
+ * attempt to set a password failed on a dead sub, with no way out of the screen.
+ *
+ * getUser() is the check, because unlike getSession() it asks the server. Only a definite "that
+ * user is not here" counts: a network blip must not sign people out.
+ */
+const sessionUserWasDeleted = async (): Promise<boolean> => {
+    const { error } = await supabase.auth.getUser();
+    // Only an explicit "that user is not here" ends a session. Anything vaguer -- a timeout, a
+    // 500, an answer we do not recognise -- leaves it alone: wrongly signing everyone out is a
+    // far worse failure than leaving one dead session to be caught at the next write.
+    if (!error) return false;
+
+    const message = (error.message || '').toLowerCase();
+    const code = ((error as { code?: string }).code || '').toLowerCase();
+    return (
+        code === 'user_not_found' ||
+        message.includes('sub claim') ||
+        message.includes('user not found') ||
+        message.includes('user from sub claim')
+    );
+};
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [session, setSession] = useState<Session | null>(null);
     const [user, setUser] = useState<SupabaseUser | null>(null);
@@ -87,26 +118,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // users.sessions_revoked_at, as of the last profile load. Set when an admin removes
     // somebody from their team or deactivates them.
     const [sessionsRevokedAt, setSessionsRevokedAt] = useState<string | null>(null);
+    // The account id whose existence has already been confirmed with the server. See adopt().
+    const validatedUserId = useRef<string | null>(null);
 
     useEffect(() => {
-        // Get initial session
-        supabase.auth.getSession().then(async ({ data: { session } }) => {
-            setSession(session);
-            setUser(session?.user ?? null);
-            if (session?.user) {
-                await checkMfa();
-                fetchProfile(session.user.id);
+        // Nothing is put in front of a session until the account behind it is known to still
+        // exist. A local sign-out is enough and is deliberate: the server has no session to end
+        // for a user it does not have, and asking it to would fail on the same dead sub.
+        //
+        // Checked once per account rather than per event: onAuthStateChange also fires on every
+        // hourly token refresh, and an account cannot come back from deletion, so re-asking buys
+        // nothing and costs a request each time.
+        const adopt = async (session: Session | null) => {
+            const uid = session?.user?.id;
+            const unchecked = uid && uid !== validatedUserId.current;
+            if (unchecked && await sessionUserWasDeleted()) {
+                await supabase.auth.signOut({ scope: 'local' });
+                clearSessionPersistence();
+                setSession(null);
+                setUser(null);
+                setProfile(null);
+                setMfaRequired(false);
+                setLoading(false);
+                return;
             }
-            else setLoading(false);
-        });
 
-        // Listen for auth changes
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-            // Fired when supabase-js consumes the token out of a reset link. It is the only
-            // signal that distinguishes "arrived here from their email" from "signed in".
-            if (event === 'PASSWORD_RECOVERY') setRecoveryMode(true);
-            if (event === 'SIGNED_OUT') setRecoveryMode(false);
-
+            if (uid) validatedUserId.current = uid;
             setSession(session);
             setUser(session?.user ?? null);
             if (session?.user) {
@@ -117,6 +154,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 setMfaRequired(false);
                 setLoading(false);
             }
+        };
+
+        // Get initial session
+        supabase.auth.getSession().then(({ data: { session } }) => adopt(session));
+
+        // Listen for auth changes
+        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+            // Fired when supabase-js consumes the token out of a reset link. It is the only
+            // signal that distinguishes "arrived here from their email" from "signed in".
+            if (event === 'PASSWORD_RECOVERY') setRecoveryMode(true);
+            if (event === 'SIGNED_OUT') setRecoveryMode(false);
+
+            // A sign-out we just performed ourselves needs no re-checking, and re-checking it
+            // would ask GoTrue about a user we already know is gone.
+            if (event === 'SIGNED_OUT' || !session) {
+                setSession(null);
+                setUser(null);
+                setProfile(null);
+                setMfaRequired(false);
+                setLoading(false);
+                return;
+            }
+
+            await adopt(session);
         });
 
         return () => subscription.unsubscribe();

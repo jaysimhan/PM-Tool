@@ -42,6 +42,14 @@ const getStrengthDetails = (score: number) => {
 const isSamePasswordError = (err: any) =>
     err?.code === 'same_password' || /different from the old password/i.test(err?.message || '');
 
+/**
+ * "User from sub claim in JWT does not exist" -- the account this session was issued for has been
+ * deleted. Nothing on this screen can succeed while that is true, so it is not an error about the
+ * password; it is an error about the session.
+ */
+const isDeletedAccountError = (err: any) =>
+    err?.code === 'user_not_found' || /sub claim|user not found/i.test(err?.message || '');
+
 const CODE_LENGTH = 6;
 const RESEND_SECONDS = 60;
 
@@ -386,6 +394,25 @@ export function Onboarding() {
             await Promise.all([refreshUsers(), refreshTeams()]);
             setStep(2);
         } catch (err: any) {
+            // The account this session was issued for is gone -- deleted, and in the usual case
+            // re-invited since, which mints a new one and leaves this browser holding a token for
+            // the old. AuthContext clears these on the way in; this catches the one that dies
+            // while the form is open. Reporting it as "could not set your password" would be a
+            // lie about a screen there is no way forward from, so the session goes and they
+            // start again from the address, which is the step that fixes it.
+            if (isDeletedAccountError(err)) {
+                await supabase.auth.signOut({ scope: 'local' });
+                setStage('email');
+                setCode('');
+                setNewPassword('');
+                setRetypePassword('');
+                setError(
+                    'That setup link was issued for an account that no longer exists — it was'
+                    + ' probably replaced by a newer invite. Enter your email address and we will'
+                    + ' send you a fresh code.'
+                );
+                return;
+            }
             setError(err.message || 'Could not set your password.');
         } finally {
             setSaving(false);
