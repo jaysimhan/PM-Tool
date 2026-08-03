@@ -36,8 +36,12 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
 
     if (!isOpen) return null;
 
+    const sameIds = (left: string[], right: string[]) =>
+        left.length === right.length && new Set(left).size === new Set([...left, ...right]).size;
+
     const handleSave = async () => {
-        if (!name.trim()) {
+        const trimmedName = name.trim();
+        if (!trimmedName) {
             setError('Name is required');
             return;
         }
@@ -45,9 +49,21 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
         setIsSaving(true);
         setError(null);
         try {
-            await updateProfile({ name: name.trim(), skillIds, clientIds, regionIds });
-            // Team Management reads skills off the shared user list, so pull it forward too.
-            await refreshUsers();
+            // Only persist fields that changed. A display-name edit should not depend on three
+            // unrelated join-table requests succeeding as well.
+            const updates: Partial<User> = {};
+            if (trimmedName !== (currentUser.name || '').trim()) updates.name = trimmedName;
+            if (!sameIds(skillIds, currentUser.skillIds || [])) updates.skillIds = skillIds;
+            if (!sameIds(clientIds, currentUser.clientIds || [])) updates.clientIds = clientIds;
+            if (!sameIds(regionIds, currentUser.regionIds || [])) updates.regionIds = regionIds;
+
+            if (Object.keys(updates).length > 0) {
+                await updateProfile(updates);
+                // This refresh only keeps Team Management's shared user list current. The
+                // profile itself is already saved and refreshed by updateProfile, so a failure
+                // here must not turn a successful save into an error in this modal.
+                void refreshUsers().catch(err => console.error('Error refreshing users:', err));
+            }
             onClose();
         } catch (err: any) {
             setError(err.message || 'Failed to update preferences');
