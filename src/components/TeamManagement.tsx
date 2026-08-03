@@ -4,7 +4,7 @@ import { User, AccessRequest } from '../types/types';
 import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon, Edit2, Trash2, Shield, Copy, Loader2, Mail, Building2, Globe } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
 import { supabase } from '../lib/supabaseClient';
-import { inviteUser, sendSetupLink, type InviteResult } from '../lib/adminInvite';
+import { inviteUser, type InviteResult } from '../lib/adminInvite';
 import toast from 'react-hot-toast';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { embedText } from '../utils/embeddings';
@@ -120,13 +120,11 @@ export default function TeamManagement({ currentUser }: Props) {
     // Invites nobody has claimed yet. Separate search and separate list from the teamless
     // members below: the two look alike and mean opposite things.
     const [pendingSearch, setPendingSearch] = useState('');
-    const [setupLinks, setSetupLinks] = useState<Record<string, string>>({});
-    const [busySetupUserId, setBusySetupUserId] = useState<string | null>(null);
+
     // Pending "let me in" requests from the login screen. Admins only -- RLS says the same,
     // so a non-admin asking for them gets an empty list rather than a hidden one.
     const [accessRequests, setAccessRequests] = useState<AccessRequest[]>([]);
     const [busyRequestId, setBusyRequestId] = useState<string | null>(null);
-    const [requestInviteLinks, setRequestInviteLinks] = useState<Record<string, string>>({});
     const [showCreateTeam, setShowCreateTeam] = useState(false);
     const [newTeamName, setNewTeamName] = useState('');
     const [newTeamDesc, setNewTeamDesc] = useState('');
@@ -337,16 +335,14 @@ export default function TeamManagement({ currentUser }: Props) {
                 return;
             }
 
-            if (result.sent) {
-                toast.success(`Invite sent to ${request.email}.`);
-            } else if (result.actionLink) {
-                // Supabase only sends invite email once custom SMTP is set up; the function
-                // mints the same link instead so the admin can pass it on by hand.
-                setRequestInviteLinks(prev => ({ ...prev, [request.id]: result.actionLink! }));
-                toast.success(`Invite created for ${request.email}. Copy the link below and send it on.`);
-            } else {
-                toast.success(`Invite created for ${request.email}.`);
-            }
+            // There is no per-person link to hand back any more, so whether the mail went out
+            // is the only thing that varies. Either way they are an invitee now, and the setup
+            // link -- the same one for everybody -- is what they use.
+            toast.success(
+                result.sent
+                    ? `${request.email} approved. Setup instructions are on their way.`
+                    : `${request.email} approved. Mail could not be sent — send them the setup link.`
+            );
 
             await resolveRequest(request.id, 'invited');
             if (refreshUsers) await refreshUsers();
@@ -385,24 +381,20 @@ export default function TeamManagement({ currentUser }: Props) {
             .sort((a, b) => a.name.localeCompare(b.name));
     }, [users, canSeeUnassigned, pendingSearch]);
 
-    /** Their auth identity exists, so a second invite is refused as a duplicate; a magic link
-     *  puts them back on step 1, which is the only thing they still owe. */
-    const resendSetup = async (user: User) => {
-        setBusySetupUserId(user.id);
+    /**
+     * There is nothing to re-issue. The setup link never expires and is the same for everybody,
+     * so somebody stuck part-way through does not need a new one -- they need this one, and a
+     * fresh code, which the page itself will send them. This used to mint a single-use magic
+     * link per person, which is exactly the thing that kept dying between the mail going out and
+     * the person clicking it.
+     */
+    const copySetupLink = async (user: User) => {
+        const link = `${window.location.origin}${INVITE_PATH}`;
         try {
-            const result = await sendSetupLink({ email: user.email });
-            if (result.actionLink) {
-                // Supabase only sends the mail itself once custom SMTP is configured; until then
-                // the function mints the same link for the admin to pass on by hand.
-                setSetupLinks(prev => ({ ...prev, [user.id]: result.actionLink! }));
-                toast.success(`Setup link created for ${user.email}. Copy it below and send it on.`);
-            } else {
-                toast.success(`Setup link sent to ${user.email}.`);
-            }
-        } catch (err) {
-            toast.error(`Could not send a setup link to ${user.email}: ${err instanceof Error ? err.message : 'unknown error'}`);
-        } finally {
-            setBusySetupUserId(null);
+            await navigator.clipboard.writeText(link);
+            toast.success(`Setup link copied — send it to ${user.email}. It does not expire.`);
+        } catch {
+            window.prompt(`Send this to ${user.email}:`, link);
         }
     };
 
@@ -628,7 +620,9 @@ export default function TeamManagement({ currentUser }: Props) {
         if (leftover) return;
         if (inviteesToProcess.length === 0) return;
 
-        const generatedLinks: { email: string, link: string }[] = [];
+        // Nobody gets a link of their own any more, so all that is tracked is who could not be
+        // mailed -- they need the shared setup link passed on by hand instead.
+        const couldNotMail: string[] = [];
         const invitedEmails: string[] = [];
 
         for (const user of inviteesToProcess) {
@@ -641,18 +635,10 @@ export default function TeamManagement({ currentUser }: Props) {
             const needsResend = !isNewInvite && existingUser?.onboardingCompleted === false;
 
             if (needsResend) {
-                // Their auth identity already exists, so an invite would be rejected as a
-                // duplicate -- a magic link gets them back to the same setup screen.
-                try {
-                    const result = await sendSetupLink({ email: user.email });
-                    if (result.actionLink) {
-                        generatedLinks.push({ email: user.email, link: result.actionLink });
-                    }
-                } catch (err) {
-                    toast.error(`Could not re-send setup link to ${user.email}: ${err instanceof Error ? err.message : 'Unknown error'}`);
-                    continue;
-                }
-
+                // Already an invitee, and the setup link they were given still works -- it is the
+                // same permanent link as everybody else's. Nothing to re-issue; they just have to
+                // go there and ask the page for a fresh code.
+                couldNotMail.push(user.email);
                 successfulInvites++;
                 invitedEmails.push(user.email);
                 continue;
@@ -670,11 +656,9 @@ export default function TeamManagement({ currentUser }: Props) {
                         teamId: actionTeam.id,
                     });
 
-                    // Supabase can only send once custom SMTP is configured. Until then the
-                    // function mints the same link for the admin to pass on by hand.
-                    if (!result.sent && result.actionLink) {
-                        generatedLinks.push({ email: user.email, link: result.actionLink });
-                    }
+                    // Supabase can only send once custom SMTP is configured; when it cannot,
+                    // the admin passes the shared setup link on by hand.
+                    if (!result.sent) couldNotMail.push(user.email);
                 } catch (err) {
                     toast.error(`Failed to invite ${user.email}: ${err instanceof Error ? err.message : 'Unknown error'}`);
                     continue;
@@ -728,15 +712,15 @@ export default function TeamManagement({ currentUser }: Props) {
         if (successfulInvites > 0) {
             const who = successfulInvites === 1 ? invitedEmails[0] : `${successfulInvites} people`;
             let alertMsg = `Invite sent to ${who} for ${actionTeam.name}.`;
-            if (generatedLinks.length > 0) {
-                // The email could not go out, so hand those links over via the clipboard instead
-                const linkText = generatedLinks.map(gl => `${gl.email}: ${gl.link}`).join('\n');
-                const plural = generatedLinks.length === 1 ? 'link' : 'links';
+            if (couldNotMail.length > 0) {
+                // One link covers all of them, so it goes on the clipboard once.
+                const link = `${window.location.origin}${INVITE_PATH}`;
+                const who = couldNotMail.length === 1 ? couldNotMail[0] : `${couldNotMail.length} of them`;
                 try {
-                    await navigator.clipboard.writeText(linkText);
-                    alertMsg += `\n\nEmail could not be delivered - the invite ${plural} copied to your clipboard. Share it with them to finish signup.`;
+                    await navigator.clipboard.writeText(link);
+                    alertMsg += `\n\nNo mail went to ${who} — the setup link is on your clipboard. Send it on; it does not expire.`;
                 } catch {
-                    alertMsg += `\n\nEmail could not be delivered - share the invite ${plural} manually:\n\n${linkText}`;
+                    alertMsg += `\n\nNo mail went to ${who} — send them ${link}`;
                 }
             }
             toast.success(alertMsg, { duration: 6000 });
@@ -1281,7 +1265,6 @@ export default function TeamManagement({ currentUser }: Props) {
                             const isDeleted = !!target?.deletedAt;
                             const canReactivate = request.kind === 'reactivation' && !!target && !isDeleted;
                             const busy = busyRequestId === request.id;
-                            const inviteLink = requestInviteLinks[request.id];
 
                             return (
                                 <div key={request.id} className="border border-gray-200 rounded-lg p-4">
@@ -1349,30 +1332,6 @@ export default function TeamManagement({ currentUser }: Props) {
                                         </div>
                                     </div>
 
-                                    {inviteLink && (
-                                        <div className="mt-3 flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg p-2">
-                                            <input
-                                                readOnly
-                                                value={inviteLink}
-                                                onFocus={(e) => e.currentTarget.select()}
-                                                className="flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700"
-                                            />
-                                            <button
-                                                onClick={async () => {
-                                                    try {
-                                                        await navigator.clipboard.writeText(inviteLink);
-                                                        toast.success('Invite link copied.');
-                                                    } catch {
-                                                        toast.error('Could not copy - select the link and copy it.');
-                                                    }
-                                                }}
-                                                className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 flex items-center gap-1"
-                                            >
-                                                <Copy className="w-3 h-3" />
-                                                Copy
-                                            </button>
-                                        </div>
-                                    )}
                                 </div>
                             );
                         })}
@@ -1403,8 +1362,9 @@ export default function TeamManagement({ currentUser }: Props) {
                     <p className="text-sm text-gray-600 mb-4">
                         Approved, but they have not set up an account yet. They stay invitees until they do
                         &mdash; their role cannot be changed, by anyone &mdash; and they join the default team the
-                        moment they finish. They can use either the link mailed to them or the shared setup link;
-                        both ask for a code sent to their address. Only admins see this list.
+                        moment they finish. There is nothing to re-issue: the setup link is the same for everybody
+                        and never expires, and the page mails them a fresh code whenever they ask. Only admins see
+                        this list.
                     </p>
 
                     {pendingSetupUsers.length === 0 ? (
@@ -1414,8 +1374,6 @@ export default function TeamManagement({ currentUser }: Props) {
                     ) : (
                         <div className="space-y-3">
                             {pendingSetupUsers.map(u => {
-                                const link = setupLinks[u.id];
-                                const busy = busySetupUserId === u.id;
                                 return (
                                     <div key={u.id} className="border border-gray-200 rounded-lg p-4">
                                         <div className="flex items-center justify-between gap-4">
@@ -1441,11 +1399,11 @@ export default function TeamManagement({ currentUser }: Props) {
 
                                             <div className="flex items-center gap-2 shrink-0">
                                                 <button
-                                                    onClick={() => resendSetup(u)}
-                                                    disabled={busy}
-                                                    className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+                                                    onClick={() => copySetupLink(u)}
+                                                    className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
                                                 >
-                                                    {busy ? 'Sending...' : 'Re-send setup link'}
+                                                    <Copy className="w-4 h-4" />
+                                                    Copy setup link
                                                 </button>
                                                 {canDeleteAccount(u) && (
                                                     <button
@@ -1459,25 +1417,6 @@ export default function TeamManagement({ currentUser }: Props) {
                                             </div>
                                         </div>
 
-                                        {link && (
-                                            <div className="mt-3 flex items-center gap-2">
-                                                <input
-                                                    readOnly
-                                                    value={link}
-                                                    onFocus={(e) => e.currentTarget.select()}
-                                                    className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-600 bg-gray-50"
-                                                />
-                                                <button
-                                                    onClick={() => {
-                                                        navigator.clipboard.writeText(link);
-                                                        toast.success('Setup link copied.');
-                                                    }}
-                                                    className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
-                                                >
-                                                    Copy
-                                                </button>
-                                            </div>
-                                        )}
                                     </div>
                                 );
                             })}

@@ -72,6 +72,8 @@ async function call(body: Record<string, unknown>): Promise<InviteResult> {
 export const inviteUser = (params: { email: string; name?: string; teamId?: string | null }) =>
     call({ action: 'invite', email: params.email, name: params.name ?? '', teamId: params.teamId ?? null });
 
-/** Someone who was invited before and never finished setting up their account. */
-export const sendSetupLink = (params: { email: string }) =>
-    call({ action: 'setup-link', email: params.email });
+// There is no sendSetupLink any more. A setup link used to be minted per person and expired,
+// which is what kept breaking between the mail going out and the person clicking it. The link
+// is now one permanent public URL (/welcome) that grants nothing on its own -- what gets somebody
+// in is the one-time code that page mails to an approved address. The Edge Function still
+// implements the 'setup-link' action; nothing in the app asks for it.

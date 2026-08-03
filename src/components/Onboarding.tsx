@@ -434,10 +434,16 @@ export function Onboarding() {
         }
     };
 
+    // Three things happen here and the person should be able to see which one they are on.
+    // `step` cannot say it by itself: it counts transactions, and the first of those -- proving
+    // the address, then setting a password -- is two pieces of work from where they are sitting.
     const steps = [
-        { number: 1, label: 'Verify email & set password' },
-        { number: 2, label: 'Team & skills' }
+        { number: 1, label: 'Verify email' },
+        { number: 2, label: 'Create password' },
+        { number: 3, label: 'Team & skills', optional: true }
     ];
+
+    const displayStep = step === 2 ? 3 : stage === 'account' ? 2 : 1;
 
     const joinedTeamName = teams.find(t => t.id === joinedTeamId)?.name;
 
@@ -445,7 +451,9 @@ export function Onboarding() {
         ? "You're in"
         : stage === 'code'
             ? 'Check your email'
-            : 'Set up your account';
+            : stage === 'account'
+                ? 'Create your password'
+                : 'Set up your account';
 
     const subheading = step === 2
         ? joinedTeamName
@@ -470,27 +478,30 @@ export function Onboarding() {
                     <h1 className="text-xl font-bold text-gray-900">{heading}</h1>
                     <p className="text-sm text-gray-500 mt-1">{subheading}</p>
 
-                    <div className="flex items-center gap-3 my-6">
+                    {/* Three of them wrap on a narrow card, so the connectors are a fixed hair
+                        rather than flex-1 -- a stretching rule either squeezes the labels or
+                        strands one on a line of its own. */}
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-2 my-6">
                         {steps.map((s, index) => (
                             <React.Fragment key={s.number}>
-                                <div className="flex items-center gap-2">
-                                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${
-                                        step > s.number
+                                <div className="flex items-center gap-1.5">
+                                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-semibold shrink-0 ${
+                                        displayStep > s.number
                                             ? 'bg-green-500 text-white'
-                                            : step === s.number
+                                            : displayStep === s.number
                                                 ? 'bg-blue-600 text-white'
                                                 : 'bg-gray-200 text-gray-500'
                                     }`}>
-                                        {step > s.number ? <Check className="w-4 h-4" /> : s.number}
+                                        {displayStep > s.number ? <Check className="w-3.5 h-3.5" /> : s.number}
                                     </div>
-                                    <span className={`text-sm font-medium ${step >= s.number ? 'text-gray-900' : 'text-gray-400'}`}>
+                                    <span className={`text-xs font-medium whitespace-nowrap ${displayStep >= s.number ? 'text-gray-900' : 'text-gray-400'}`}>
                                         {s.label}
                                     </span>
-                                    {s.number === 2 && (
-                                        <span className="text-xs text-gray-400">(optional)</span>
+                                    {s.optional && (
+                                        <span className="text-[11px] text-gray-400">(optional)</span>
                                     )}
                                 </div>
-                                {index < steps.length - 1 && <div className="flex-1 h-px bg-gray-200" />}
+                                {index < steps.length - 1 && <div className="w-4 h-px bg-gray-200" />}
                             </React.Fragment>
                         ))}
                     </div>
