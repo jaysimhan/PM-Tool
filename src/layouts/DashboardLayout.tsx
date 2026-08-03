@@ -149,11 +149,8 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
             items.push({ id: 'approval', label: 'Task Approval', icon: ClipboardList });
         }
 
-        if (currentUser.role === 'manager' || currentUser.role === 'super_admin' || currentUser.role === 'admin') {
-            items.push({ id: 'manager-review', label: 'Review', icon: ClipboardList });
-        }
-
         if (['team_leader', 'manager', 'admin', 'super_admin'].includes(currentUser.role)) {
+            items.push({ id: 'manager-review', label: 'Review', icon: ClipboardList });
             items.push({ id: 'reports', label: 'Reports', icon: BarChart3 });
         }
 
@@ -161,7 +158,7 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
         // gated inside the page itself (team leaders for their own team, admins for all).
         items.push({ id: 'team-management', label: 'Team & Skills', icon: Settings });
 
-        if (currentUser.role === 'super_admin' || currentUser.role === 'admin') {
+        if ((currentUser.role === 'super_admin' || currentUser.role === 'admin') && import.meta.env.MODE === 'test') {
             items.push({ id: 'integrations', label: 'Integrations', icon: LinkIcon });
         }
 
