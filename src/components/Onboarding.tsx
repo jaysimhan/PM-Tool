@@ -467,7 +467,7 @@ export function Onboarding() {
     const steps = [
         { number: 1, label: 'Verify email' },
         { number: 2, label: 'Create password' },
-        { number: 3, label: 'Team & skills', optional: true }
+        { number: 3, label: 'Team & skills' }
     ];
 
     const displayStep = step === 2 ? 3 : stage === 'account' ? 2 : 1;
@@ -564,13 +564,13 @@ export function Onboarding() {
                                     autoFocus
                                     value={verifyEmail}
                                     onChange={(e) => setVerifyEmail(e.target.value)}
-                                    placeholder="you@carestack.com"
+                                    placeholder="you@example.com"
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
                                 />
-                                <p className="text-xs text-gray-500">
+                                <div className="mt-2 bg-amber-50 text-amber-800 px-3 py-2.5 rounded-lg text-xs font-medium border border-amber-200">
                                     This has to be the address an admin approved. A code only goes out to an
                                     address that has been.
-                                </p>
+                                </div>
                             </div>
 
                             <div className="pt-2 flex justify-end">
