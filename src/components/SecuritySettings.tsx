@@ -575,10 +575,18 @@ export function SecuritySettings() {
                                 <label className="block text-sm font-medium text-gray-700">
                                     Current Password <span className="text-gray-500">*</span>
                                 </label>
+                                {/* Declared, like the two below it. An undeclared password box is
+                                    one a browser fills on its own guess about what the form is,
+                                    and a set of boxes filled as one group is a set it then keeps
+                                    in step -- which is how a character typed into a new-password
+                                    field turns up in the retype field as well. current-password
+                                    here is the one that should be offered from the manager. */}
                                 <div className="relative">
                                     <input
                                         type={showCurrent ? "text" : "password"}
                                         required
+                                        name="current-password"
+                                        autoComplete="current-password"
                                         value={currentPassword}
                                         onChange={(e) => setCurrentPassword(e.target.value)}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
@@ -630,6 +638,8 @@ export function SecuritySettings() {
                                 <input
                                     type={showNew ? "text" : "password"}
                                     required
+                                    name="new-password"
+                                    autoComplete="new-password"
                                     value={newPassword}
                                     onChange={(e) => setNewPassword(e.target.value)}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
@@ -670,6 +680,8 @@ export function SecuritySettings() {
                                 <input
                                     type={showRetype ? "text" : "password"}
                                     required
+                                    name="confirm-password"
+                                    autoComplete="new-password"
                                     value={retypePassword}
                                     onChange={(e) => setRetypePassword(e.target.value)}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"

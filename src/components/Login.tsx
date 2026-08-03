@@ -358,9 +358,16 @@ export function Login() {
                         <path d="M1.5 5.5l6 4 6-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                       </svg>
                     </div>
+                    {/* username / current-password, the pair a browser is looking for. Undeclared,
+                        these were filled on a guess -- which worked often enough, and is worth
+                        making deliberate here: this is the one form in the app where a saved
+                        credential being offered is the point, rather than the thing that made two
+                        password boxes move together. */}
                     <input
                       type="email"
                       required
+                      name="email"
+                      autoComplete="username"
                       placeholder="you@company.com"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
@@ -397,6 +404,8 @@ export function Login() {
                     <input
                       type={showPassword ? "text" : "password"}
                       required
+                      name="password"
+                      autoComplete="current-password"
                       placeholder="••••••••"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}

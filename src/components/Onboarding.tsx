@@ -590,9 +590,14 @@ export function Onboarding() {
                                 <label className="block text-sm font-medium text-gray-700">
                                     Your Name <span className="text-gray-500">*</span>
                                 </label>
+                                {/* Named too, for the same reason: the only undeclared text box on
+                                    a form full of password fields is what a browser picks as the
+                                    username to fill. */}
                                 <input
                                     type="text"
                                     required
+                                    name="name"
+                                    autoComplete="name"
                                     value={name}
                                     onChange={(e) => setName(e.target.value)}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
@@ -629,10 +634,21 @@ export function Onboarding() {
                                         )}
                                     </div>
                                 </div>
+                                {/* new-password, and a name, on both boxes. Neither said what it
+                                    was, so Chrome read the form as a sign-in and filled a saved
+                                    password into every password field it could see -- and once a
+                                    set of fields is filled as one group, Chrome keeps them in
+                                    step, so a character typed or deleted in this box appeared and
+                                    disappeared in the retype box too. It looked like the two
+                                    inputs shared state. They never did; the browser was editing
+                                    both. Declaring them new-password stops a saved credential
+                                    being offered here at all, which is what dissolves the group. */}
                                 <div className="relative">
                                     <input
                                         type={showNew ? 'text' : 'password'}
                                         required
+                                        name="new-password"
+                                        autoComplete="new-password"
                                         value={newPassword}
                                         onChange={(e) => setNewPassword(e.target.value)}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
@@ -671,6 +687,8 @@ export function Onboarding() {
                                     <input
                                         type={showRetype ? 'text' : 'password'}
                                         required
+                                        name="confirm-password"
+                                        autoComplete="new-password"
                                         value={retypePassword}
                                         onChange={(e) => setRetypePassword(e.target.value)}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
