@@ -413,6 +413,13 @@ verify_jwt = false
 enabled = true
 verify_jwt = true
 
+# Setting the first password on an account nobody is signed in to, which is by definition a call
+# with no JWT to verify. What it accepts instead is an address the database says is an
+# un-onboarded invitee -- see its header comment, including what that costs.
+[functions.onboarding-claim]
+enabled = true
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
-import { Building2, Check, Eye, EyeOff, Globe, Info, Loader2, Mail, Users } from 'lucide-react';
+import { Building2, Check, Eye, EyeOff, Globe, Info, Loader2, Users } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { supabase } from '../lib/supabaseClient';
 import { useAuth, saveUserSkills, saveUserClients, saveUserRegions } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
@@ -9,6 +10,7 @@ import { Logo } from './Logo';
 import { SkillPicker } from './SkillPicker';
 import { PreferenceMultiSelect } from './PreferenceMultiSelect';
 import { AccessRequestModal } from './AccessRequestModal';
+import { checkOnboardingEmail, claimInviteeAccount, OnboardingEmailStatus } from '../lib/onboardingClaim';
 
 const PageLoader = () => (
     <div className="flex items-center justify-center h-screen bg-gray-50">
@@ -50,9 +52,6 @@ const isSamePasswordError = (err: any) =>
 const isDeletedAccountError = (err: any) =>
     err?.code === 'user_not_found' || /sub claim|user not found/i.test(err?.message || '');
 
-const CODE_LENGTH = 6;
-const RESEND_SECONDS = 60;
-
 /**
  * What GoTrue puts in the URL when a link does not work out. It arrives in the fragment
  * (#error=access_denied&error_code=otp_expired&...) and, unlike the success case, supabase-js
@@ -72,32 +71,23 @@ function readLinkError(): string | null {
     if (!code && !description && !error) return null;
 
     if (code === 'otp_expired' || /expired/i.test(description || '')) {
-        return 'That link has expired or had already been used. Links are good for one visit only — enter your email below and we will send you a fresh code instead.';
+        return 'That link has expired or had already been used. Links are good for one visit only — no matter: enter your email below and carry on from there.';
     }
     return description
         ? description.replace(/\+/g, ' ')
-        : 'That link did not work. Enter your email below and we will send you a code instead.';
+        : 'That link did not work. Enter your email below and carry on from there.';
 }
 
 /**
- * Asking for a code for an address with no account has to look exactly like asking for one that
- * does, or this screen -- which anyone holding the shared link can open -- becomes a way to find
- * out who works here. Supabase says "signups not allowed" for the unknown ones; that is not
- * something the visitor gets to see.
- *
- * Anything else (rate limiting, above all) is a real obstacle and is worth repeating verbatim.
+ * Where step 1 sends an address that is not waiting to be set up, and what it says on the way.
+ * Every one of these is somebody who should be on the sign-in page: either they have a password
+ * already, or the thing they need is an admin rather than this screen.
  */
-const isUnknownAddressError = (err: any) => {
-    const message = (err?.message || '').toLowerCase();
-    const code = (err?.code || '').toLowerCase();
-    return (
-        code === 'otp_disabled' ||
-        code === 'signup_disabled' ||
-        code === 'user_not_found' ||
-        message.includes('signups not allowed') ||
-        message.includes('signup is disabled') ||
-        message.includes('user not found')
-    );
+const turnedAwayMessage: Record<Exclude<OnboardingEmailStatus, 'invitee'>, string> = {
+    member: 'You are already a member — sign in with your password.',
+    deactivated: 'That account has been deactivated. Ask an admin to turn it back on, or use "Request reactivation".',
+    deleted: 'That account has been deleted. Use "Request reactivation" and an admin can restore it.',
+    unknown: 'We have no account for that address yet. Ask an admin, or use "Request access".',
 };
 
 /**
@@ -113,17 +103,24 @@ const isUnknownAddressError = (err: any) => {
  * So the credential moved off the link. /welcome is now a public address that anyone may open,
  * and step 1 establishes who they are on the spot:
  *
- *   1a  email     -- the address they were approved under. signInWithOtp(shouldCreateUser:false)
- *                    mails a code to it, and refuses any address without an account. That
- *                    refusal is the allow-list: a requester nobody approved has no account, so
- *                    no code is ever sent, and the screen says the same thing either way.
- *   1b  code      -- verifyOtp. Proving they read mail at that address is what signs them in.
- *   1c  account   -- name and password, as before.
+ *   1a  email     -- the address they were approved under. onboarding_email_status() says which
+ *                    of five states it is in, and only one of them belongs on this screen: an
+ *                    invitee, meaning an account an admin created that has never been set up.
+ *                    A member, a disabled account and an address with no account are all told
+ *                    why in a toast and sent to /login, which is where what they need is.
+ *   1b  account   -- name and password.
  *
- * Somebody who followed a working invite or setup link from their mail arrives already signed in
- * and starts at 1c; 1a and 1b are what the shared link needs and what a dead link falls back to.
+ * Somebody who followed a working invite link from their mail arrives already signed in and
+ * starts at 1b; 1a is what the shared link needs and what a dead link falls back to.
  *
- * Finishing 1c is what turns an invitee into a member: complete_onboarding_step_one() sets
+ * The one-time code that used to sit between the two is parked (it is in the history if it comes
+ * back). It proved the visitor reads mail at the address, and without it the address alone is
+ * what gets somebody in -- which is also why the password on 1b cannot be set with
+ * `auth.updateUser`: there is no session to set it under. The onboarding-claim Edge Function
+ * does it, under the same invitee rule, and the browser then signs in with what it set. See that
+ * function's header for what parking the code costs.
+ *
+ * Finishing 1b is what turns an invitee into a member: complete_onboarding_step_one() sets
  * onboarding_completed, promotes them out of 'invitee', puts them on the default team and closes
  * their access request, in one transaction.
  *
@@ -138,11 +135,9 @@ export function Onboarding() {
     const [step, setStep] = useState(1);
     // How far into step 1 somebody who is not signed in yet has got. Once they are, the session
     // decides -- see `stage` below.
-    const [unverifiedStage, setStage] = useState<'email' | 'code'>('email');
+    const [unverifiedStage, setStage] = useState<'email' | 'account'>('email');
     const [verifyEmail, setVerifyEmail] = useState('');
-    const [code, setCode] = useState('');
-    const [sendingCode, setSendingCode] = useState(false);
-    const [resendIn, setResendIn] = useState(0);
+    const [checking, setChecking] = useState(false);
     const [showRequestAccess, setShowRequestAccess] = useState(false);
     // Only ever read once, and before anything else can rewrite the URL.
     const [linkError, setLinkError] = useState<string | null>(readLinkError);
@@ -178,7 +173,9 @@ export function Onboarding() {
     // would send them straight out of step 2 through the guard below.
     const completedStepOneHere = useRef(false);
 
-    const email = session?.user?.email || '';
+    // The session's address when there is one, and otherwise the one they just typed and had
+    // checked -- which is the address the rest of step 1 is about either way.
+    const email = session?.user?.email || verifyEmail;
     const strengthScore = useMemo(() => calculateStrength(newPassword), [newPassword]);
     const strengthDetails = getStrengthDetails(strengthScore);
 
@@ -186,28 +183,21 @@ export function Onboarding() {
     // email. An admin who invited by address alone leaves the name as that address, so
     // treat that the same as having typed nothing.
     useEffect(() => {
-        if (!session?.user) return;
-        const meta = session.user.user_metadata || {};
+        if (!email) return;
+        const meta = session?.user?.user_metadata || {};
         const invited = [meta.name, meta.full_name].find(n => n && !n.includes('@'));
         setName(prev => prev || invited || email.split('@')[0] || '');
     }, [session, email]);
 
-    // A session is proof of identity however it was obtained -- a working link from their mail,
-    // or the code they just typed -- so it is the one thing that decides whether the first two
-    // sub-steps still have anything to ask. Derived rather than stored: an effect would leave
-    // one render showing the email form to somebody who is already signed in.
-    const stage: 'email' | 'code' | 'account' = session?.user ? 'account' : unverifiedStage;
+    // A session is proof of identity however it was obtained, so it settles the question of
+    // whether the address still has to be established. Derived rather than stored: an effect
+    // would leave one render showing the email form to somebody who is already signed in.
+    const stage: 'email' | 'account' = session?.user ? 'account' : unverifiedStage;
 
     // Whatever a dead link had to say stops mattering the moment they are in.
     useEffect(() => {
         if (session?.user) setLinkError(null);
     }, [session]);
-
-    useEffect(() => {
-        if (resendIn <= 0) return;
-        const timer = setTimeout(() => setResendIn(seconds => seconds - 1), 1000);
-        return () => clearTimeout(timer);
-    }, [resendIn]);
 
     // Read teams/skills straight from Supabase rather than DataContext: DataContext loads
     // once on mount, which on an invite link can be before the session exists.
@@ -283,8 +273,15 @@ export function Onboarding() {
         return <Navigate to="/login" replace />;
     }
 
-    /** Mails a one-time code to the address, if there is an account behind it to mail. */
-    const handleSendCode = async (e?: React.FormEvent) => {
+    /**
+     * The whole of step 1a: is there an account behind this address waiting to be set up?
+     *
+     * Only an invitee stays here. Everyone else is somebody the sign-in page can do more for
+     * than this one can -- a member has a password, and a disabled or unknown address needs an
+     * admin -- so they are told which it is and sent there rather than shown a password box
+     * that would be refused at the end of it.
+     */
+    const handleCheckEmail = async (e?: React.FormEvent) => {
         e?.preventDefault();
         const address = verifyEmail.trim().toLowerCase();
         if (!address) {
@@ -292,69 +289,24 @@ export function Onboarding() {
             return;
         }
 
-        setSendingCode(true);
+        setChecking(true);
         setError(null);
         setLinkError(null);
         try {
-            const { error: otpError } = await supabase.auth.signInWithOtp({
-                email: address,
-                options: { shouldCreateUser: false }
-            });
-            // An address nobody has approved is turned away here, and must not look any
-            // different from one that was: the code screen comes up either way and no code
-            // ever arrives. Everything else -- rate limits above all -- is said plainly.
-            //
-            // Kept out of the visitor's sight but not out of ours. Hiding the refusal is the
-            // point; hiding it from whoever is debugging "no code arrived" is not, and the two
-            // outcomes are otherwise identical on screen.
-            if (otpError && isUnknownAddressError(otpError)) {
-                console.warn(
-                    '[onboarding] No code sent — GoTrue refused the address.'
-                    + ' Either it has no auth.users row (never invited), or email sign-in is off.',
-                    { code: otpError.code, message: otpError.message }
-                );
+            const status = await checkOnboardingEmail(address);
+
+            if (status !== 'invitee') {
+                toast(turnedAwayMessage[status], { icon: 'ℹ️', duration: 7000 });
+                navigate('/login', { replace: true });
+                return;
             }
-            if (otpError && !isUnknownAddressError(otpError)) throw otpError;
 
             setVerifyEmail(address);
-            setCode('');
-            setStage('code');
-            setResendIn(RESEND_SECONDS);
+            setStage('account');
         } catch (err: any) {
-            setError(err.message || 'Could not send a code to that address.');
+            setError(err.message || 'Could not check that address.');
         } finally {
-            setSendingCode(false);
-        }
-    };
-
-    /** The code is the credential. Getting it right is what signs them in. */
-    const handleVerifyCode = async (e: React.FormEvent) => {
-        e.preventDefault();
-        const token = code.trim();
-        if (token.length !== CODE_LENGTH) {
-            setError(`Enter the ${CODE_LENGTH}-digit code from your email.`);
-            return;
-        }
-
-        setSaving(true);
-        setError(null);
-        try {
-            const { error: verifyError } = await supabase.auth.verifyOtp({
-                email: verifyEmail,
-                token,
-                type: 'email'
-            });
-            if (verifyError) throw verifyError;
-            // The session lands through onAuthStateChange, and the effect above moves the
-            // screen on; there is nothing to do here but stop.
-        } catch (err: any) {
-            setError(
-                /expired|invalid/i.test(err?.message || '')
-                    ? 'That code is wrong or has expired. Check the latest email, or send yourself a new code.'
-                    : err.message || 'Could not verify that code.'
-            );
-        } finally {
-            setSaving(false);
+            setChecking(false);
         }
     };
 
@@ -376,23 +328,54 @@ export function Onboarding() {
         setSaving(true);
         setError(null);
         try {
-            const { error: updateError } = await supabase.auth.updateUser({
-                password: newPassword,
-                data: { name: name.trim() }
-            });
-            // Typing the password they already have is not a mistake worth stopping for: the
-            // point of this step is that a password exists, and one does.
-            if (updateError && !isSamePasswordError(updateError)) throw updateError;
+            // The invite carried a team; whichever way the session was obtained, that is where
+            // it is, and it has to survive into the RPC below.
+            let invitedTeamId: string | null = session?.user?.user_metadata?.team_id ?? null;
+
+            if (session?.user) {
+                const { error: updateError } = await supabase.auth.updateUser({
+                    password: newPassword,
+                    data: { name: name.trim() }
+                });
+                // Typing the password they already have is not a mistake worth stopping for: the
+                // point of this step is that a password exists, and one does.
+                if (updateError && !isSamePasswordError(updateError)) throw updateError;
+            } else {
+                // Nobody is signed in, because step 1a established the address by asking the
+                // database rather than by mailing it. `updateUser` has no session to work with,
+                // so the Edge Function sets the password (and confirms the address, which an
+                // invite leaves unconfirmed), and signing in with it is what produces the
+                // session the RPC below needs.
+                await claimInviteeAccount({
+                    email: verifyEmail,
+                    name: name.trim(),
+                    password: newPassword
+                });
+
+                const { data: signedIn, error: signInError } = await supabase.auth.signInWithPassword({
+                    email: verifyEmail,
+                    password: newPassword
+                });
+                if (signInError) throw signInError;
+
+                invitedTeamId = (signedIn.user?.user_metadata?.team_id as string | undefined) ?? null;
+            }
+
+            // Before the call, not after. On the claim path the sign-in above happens in this
+            // same submit, so AuthContext is still fetching the profile while the RPC below
+            // commits -- and a fetch that lands after that commit sees onboarding_completed and
+            // renders the guard, which would throw them out to /login having just set their
+            // password. Nothing is claimed prematurely: the guard needs a completed profile as
+            // well, so if the RPC fails this flag alone changes nothing.
+            completedStepOneHere.current = true;
 
             // One call for the rest of it: the name, onboarding_completed, the promotion out of
-            // 'requester', and the default team. An invite that named a team keeps it.
+            // 'invitee', and the default team. An invite that named a team keeps it.
             const { data: result, error: rpcError } = await supabase.rpc('complete_onboarding_step_one', {
                 p_name: name.trim(),
-                p_team_id: session?.user?.user_metadata?.team_id ?? null
+                p_team_id: invitedTeamId
             });
             if (rpcError) throw rpcError;
-
-            completedStepOneHere.current = true;
 
             const landedOn = (result as any)?.team_id as string | undefined;
             if (landedOn) {
@@ -414,13 +397,12 @@ export function Onboarding() {
             if (isDeletedAccountError(err)) {
                 await supabase.auth.signOut({ scope: 'local' });
                 setStage('email');
-                setCode('');
                 setNewPassword('');
                 setRetypePassword('');
                 setError(
                     'That setup link was issued for an account that no longer exists — it was'
-                    + ' probably replaced by a newer invite. Enter your email address and we will'
-                    + ' send you a fresh code.'
+                    + ' probably replaced by a newer invite. Enter your email address to start'
+                    + ' again.'
                 );
                 return;
             }
@@ -473,10 +455,13 @@ export function Onboarding() {
     };
 
     // Three things happen here and the person should be able to see which one they are on.
-    // `step` cannot say it by itself: it counts transactions, and the first of those -- proving
-    // the address, then setting a password -- is two pieces of work from where they are sitting.
+    // `step` cannot say it by itself: it counts transactions, and the first of those -- the
+    // address, then a password -- is two pieces of work from where they are sitting.
+    //
+    // "Your email" rather than "Verify email": nothing here verifies that they read mail at the
+    // address any more, and a label should not claim otherwise.
     const steps = [
-        { number: 1, label: 'Verify email' },
+        { number: 1, label: 'Your email' },
         { number: 2, label: 'Create password' },
         { number: 3, label: 'Team & skills' }
     ];
@@ -487,23 +472,19 @@ export function Onboarding() {
 
     const heading = step === 2
         ? "You're in"
-        : stage === 'code'
-            ? 'Check your email'
-            : stage === 'account'
-                ? 'Create your password'
-                : 'Set up your account';
+        : stage === 'account'
+            ? 'Create your password'
+            : 'Set up your account';
 
     const subheading = step === 2
         ? joinedTeamName
             ? `Your account is ready and you've been added to ${joinedTeamName}. The rest is optional — change your team or tell us what you work on, or skip it and do it later from Preferences.`
             : 'Your account is ready. The rest is optional — tell us what you work on, or skip it and do it later from Preferences.'
         : stage === 'email'
-            ? 'Start with the email address your access was approved under. We will send a one-time code to it.'
-            : stage === 'code'
-                ? `We sent a ${CODE_LENGTH}-digit code to ${verifyEmail}. Enter it below to confirm the address is yours.`
-                : arrivedWithPassword
-                    ? 'Confirm your name and password to finish creating your account. If you have already chosen a password, enter it again here.'
-                    : "Your email is confirmed. Pick a name and a password and you're in.";
+            ? 'Start with the email address your access was approved under.'
+            : arrivedWithPassword
+                ? 'Confirm your name and password to finish creating your account. If you have already chosen a password, enter it again here.'
+                : "Pick a name and a password and you're in.";
 
     return (
         <div className="min-h-screen bg-gray-50 py-12 px-4 flex justify-center font-sans">
@@ -561,7 +542,7 @@ export function Onboarding() {
                     )}
 
                     {step === 1 && stage === 'email' ? (
-                        <form onSubmit={handleSendCode} className="space-y-5">
+                        <form onSubmit={handleCheckEmail} className="space-y-5">
                             <div className="space-y-1">
                                 <label className="block text-sm font-medium text-gray-700">
                                     Work email <span className="text-gray-500">*</span>
@@ -576,78 +557,20 @@ export function Onboarding() {
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
                                 />
                                 <div className="mt-2 bg-amber-50 text-amber-800 px-3 py-2.5 rounded-lg text-xs font-medium border border-amber-200">
-                                    This has to be the address an admin approved. A code only goes out to an
-                                    address that has been.
+                                    This has to be the address an admin approved, character for character.
+                                    Only an address that is waiting to be set up gets past here.
                                 </div>
                             </div>
 
                             <div className="pt-2 flex justify-end">
                                 <button
                                     type="submit"
-                                    disabled={sendingCode || !verifyEmail.trim()}
+                                    disabled={checking || !verifyEmail.trim()}
                                     className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
                                 >
-                                    {sendingCode ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
-                                    Send me a code
+                                    {checking && <Loader2 className="w-4 h-4 animate-spin" />}
+                                    Continue
                                 </button>
-                            </div>
-                        </form>
-                    ) : step === 1 && stage === 'code' ? (
-                        <form onSubmit={handleVerifyCode} className="space-y-5">
-                            <div className="space-y-1">
-                                <label className="block text-sm font-medium text-gray-700">
-                                    Verification code <span className="text-gray-500">*</span>
-                                </label>
-                                <input
-                                    type="text"
-                                    inputMode="numeric"
-                                    autoComplete="one-time-code"
-                                    autoFocus
-                                    required
-                                    maxLength={CODE_LENGTH}
-                                    value={code}
-                                    onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
-                                    placeholder="000000"
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-lg tracking-[0.4em] font-mono"
-                                />
-                                {/* A mistyped address reaches this screen looking exactly like a
-                                    working one -- the send is silent either way, which is the
-                                    point of not confirming whether an address is registered. That
-                                    is defensible; leaving somebody to guess which of the two they
-                                    are looking at is not, so the possibility is named here. */}
-                                <p className="text-xs text-gray-500">
-                                    Nothing arriving? Check spam, and check that address is character-for-character
-                                    the one your approval went to — a typo cannot be told apart from a working
-                                    address here, because we never say whether an address is registered. If it has
-                                    not been approved yet, no code is sent — ask an admin, or request access below.
-                                </p>
-                            </div>
-
-                            <div className="pt-2 flex items-center justify-between gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => { setStage('email'); setError(null); setCode(''); }}
-                                    className="text-sm text-gray-500 hover:text-gray-700 font-medium"
-                                >
-                                    Use a different email
-                                </button>
-                                <div className="flex items-center gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={() => handleSendCode()}
-                                        disabled={sendingCode || resendIn > 0}
-                                        className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                                    >
-                                        {resendIn > 0 ? `Resend in ${resendIn}s` : 'Resend code'}
-                                    </button>
-                                    <button
-                                        type="submit"
-                                        disabled={saving || code.length !== CODE_LENGTH}
-                                        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
-                                    >
-                                        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Verify'}
-                                    </button>
-                                </div>
                             </div>
                         </form>
                     ) : step === 1 ? (
@@ -896,24 +819,43 @@ export function Onboarding() {
                     )}
                 </div>
 
+                {/* Two different ways of not being the person this screen thinks it is talking to.
+                    With a session there is something to end; without one, nothing has happened
+                    yet and the address is simply the wrong one, so going back a step is the fix
+                    rather than being sent to a sign-in page they cannot use. */}
                 {step === 1 && stage === 'account' && (
                     <p className="text-center text-xs text-gray-500 mt-4">
                         Not {email}?{' '}
-                        <button
-                            type="button"
-                            onClick={async () => {
-                                await signOut();
-                                navigate('/login', { replace: true });
-                            }}
-                            className="text-blue-600 hover:text-blue-700 font-medium"
-                        >
-                            Sign out
-                        </button>
+                        {session?.user ? (
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    await signOut();
+                                    navigate('/login', { replace: true });
+                                }}
+                                className="text-blue-600 hover:text-blue-700 font-medium"
+                            >
+                                Sign out
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setStage('email');
+                                    setError(null);
+                                    setNewPassword('');
+                                    setRetypePassword('');
+                                }}
+                                className="text-blue-600 hover:text-blue-700 font-medium"
+                            >
+                                Use a different email
+                            </button>
+                        )}
                     </p>
                 )}
 
-                {/* Before a session exists this is the only honest answer to "it says no code was
-                    sent": they have not been approved, and asking is the way to be. */}
+                {/* Before a session exists this is the only honest answer to "it says my address
+                    is not one you know": they have not been approved, and asking is the way to be. */}
                 {step === 1 && stage !== 'account' && (
                     <p className="text-center text-xs text-gray-500 mt-4">
                         Not been approved yet?{' '}
