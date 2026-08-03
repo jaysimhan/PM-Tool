@@ -525,9 +525,6 @@ export function Onboarding() {
                                     </div>
                                     <span className={`text-[11px] font-medium text-center leading-tight ${displayStep >= s.number ? 'text-gray-900' : 'text-gray-400'}`}>
                                         {s.label}
-                                        {s.optional && (
-                                            <span className="block text-gray-400 font-normal">(optional)</span>
-                                        )}
                                     </span>
                                 </div>
                                 {/* Sits level with the middle of the circles above the labels. */}
