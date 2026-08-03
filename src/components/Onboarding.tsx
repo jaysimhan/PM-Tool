@@ -303,6 +303,17 @@ export function Onboarding() {
             // An address nobody has approved is turned away here, and must not look any
             // different from one that was: the code screen comes up either way and no code
             // ever arrives. Everything else -- rate limits above all -- is said plainly.
+            //
+            // Kept out of the visitor's sight but not out of ours. Hiding the refusal is the
+            // point; hiding it from whoever is debugging "no code arrived" is not, and the two
+            // outcomes are otherwise identical on screen.
+            if (otpError && isUnknownAddressError(otpError)) {
+                console.warn(
+                    '[onboarding] No code sent — GoTrue refused the address.'
+                    + ' Either it has no auth.users row (never invited), or email sign-in is off.',
+                    { code: otpError.code, message: otpError.message }
+                );
+            }
             if (otpError && !isUnknownAddressError(otpError)) throw otpError;
 
             setVerifyEmail(address);
@@ -599,9 +610,16 @@ export function Onboarding() {
                                     placeholder="000000"
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-lg tracking-[0.4em] font-mono"
                                 />
+                                {/* A mistyped address reaches this screen looking exactly like a
+                                    working one -- the send is silent either way, which is the
+                                    point of not confirming whether an address is registered. That
+                                    is defensible; leaving somebody to guess which of the two they
+                                    are looking at is not, so the possibility is named here. */}
                                 <p className="text-xs text-gray-500">
-                                    Nothing arriving? Check spam. If the address has not been approved yet, no
-                                    code is sent — ask an admin, or request access below.
+                                    Nothing arriving? Check spam, and check that address is character-for-character
+                                    the one your approval went to — a typo cannot be told apart from a working
+                                    address here, because we never say whether an address is registered. If it has
+                                    not been approved yet, no code is sent — ask an admin, or request access below.
                                 </p>
                             </div>
 

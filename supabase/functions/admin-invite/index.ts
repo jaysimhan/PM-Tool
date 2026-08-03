@@ -64,6 +64,12 @@ function resolveRedirect(requested: unknown): { url: string } | { error: string 
     const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
     const allowed = configured.length > 0 ? configured.includes(origin) || isLocal : isLocal;
 
+    // Unset ALLOWED_REDIRECT_ORIGINS leaves localhost as the only permitted origin, which is the
+    // right default -- but it means every invite from the deployed site is refused while every
+    // invite from a dev machine works, and the two are indistinguishable under one error code.
+    // That cost us a round of "invites are broken and the logs just say not allowed", so the
+    // empty list gets to say it is empty. Nothing is permitted that was not permitted before.
+    if (!allowed && configured.length === 0) return { error: 'redirect_not_configured' };
     if (!allowed) return { error: 'redirect_not_allowed' };
     if (parsed.protocol !== 'https:' && !isLocal) return { error: 'redirect_not_https' };
 

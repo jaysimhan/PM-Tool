@@ -25,6 +25,10 @@ const messages: Record<string, string> = {
     not_your_team: 'You can only invite people into a team you belong to.',
     invalid_email: 'That is not a valid email address.',
     redirect_not_allowed: 'This site is not on the allowed redirect list for invites.',
+    redirect_not_configured:
+        'Invites are not configured for this site yet, so nobody can be invited from it. An admin'
+        + ' needs to set ALLOWED_REDIRECT_ORIGINS on the admin-invite function to this site\'s'
+        + ' address. Invites still work from localhost, which is why this only shows up here.',
     redirect_not_https: 'Invites can only be sent from a secure (https) site.',
 };
 
