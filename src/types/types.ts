@@ -1,6 +1,15 @@
 // Type definitions for the workload management system
 
-export type UserRole = 'super_admin' | 'admin' | 'manager' | 'team_leader' | 'team_member' | 'requester';
+// 'requester' and 'invitee' are the two states before membership, and the difference between
+// them is approval: a requester asked to be let in and has no account, an invitee was approved
+// and has an account waiting for a password. Neither can be assigned work, so both are filtered
+// out of the member pickers; only an invitee can complete setup.
+export type UserRole = 'super_admin' | 'admin' | 'manager' | 'team_leader' | 'team_member' | 'invitee' | 'requester';
+
+/** Everyone who is not a member yet. Not assignable, not shown in workload pickers. */
+export const PRE_MEMBER_ROLES: UserRole[] = ['invitee', 'requester'];
+
+export const isPreMember = (role: UserRole) => PRE_MEMBER_ROLES.includes(role);
 
 export type TaskStatus =
     | 'new_request'

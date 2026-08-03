@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Users, Check } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
 import { useMemberView } from '../contexts/MemberViewContext';
-import { User } from '../types/types';
+import { User, isPreMember } from '../types/types';
 
 const initials = (name: string) =>
     name.includes('@')
@@ -30,11 +30,12 @@ export function MemberViewPicker() {
     const [query, setQuery] = useState('');
     const containerRef = useRef<HTMLDivElement>(null);
 
-    // Requesters only ever file work, so they are never the answer to "whose workload".
+    // Requesters and invitees have no work and cannot be given any, so they are never the
+    // answer to "whose workload".
     const members = useMemo(
         () =>
             users
-                .filter(u => u.isActive && !u.deletedAt && u.role !== 'requester')
+                .filter(u => u.isActive && !u.deletedAt && !isPreMember(u.role))
                 .sort((a, b) => a.name.localeCompare(b.name)),
         [users]
     );

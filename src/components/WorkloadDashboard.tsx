@@ -5,7 +5,7 @@ import {
     loadColor, loadLabel, PriorityPill, Pill, CapBar, ViewIcons 
 } from './WorkloadDashboardHelpers';
 
-import { User, Task } from '../types/types';
+import { User, Task, isPreMember } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { calculateDailyCapacity, getDatesInRange, formatDate, getWorkloadColor, getStatusBadgeColor, formatStatusLabel, getPriorityColor, getProjectTimelineBounds, getTimelineColumns, TimelineColumn } from '../utils/capacityCalculations';
 import { Filter, Download, Calendar, List, LayoutGrid, GanttChart, ArrowUpDown } from 'lucide-react';
@@ -122,7 +122,7 @@ export default function WorkloadDashboard({ currentUser }: Props) {
         if (selectedTeamId === 'all') {
             const visibleTeamIds = visibleTeams.map(t => t.id);
             return users.filter(u =>
-                u.role !== 'requester' &&
+                !isPreMember(u.role) &&
                 u.isActive &&
                 (currentUser.role === 'super_admin' || currentUser.role === 'admin' || currentUser.role === 'manager' || (u.teamIds && u.teamIds.some(tid => visibleTeamIds.includes(tid))) || u.id === currentUser.id)
             );

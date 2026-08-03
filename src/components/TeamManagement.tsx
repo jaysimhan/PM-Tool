@@ -34,16 +34,27 @@ const splitEntries = (raw: string): string[] =>
 
 // Icon-only, with the label in a tooltip: the invite dialog is narrow and the link is the
 // secondary action there, so it should not compete with Send for width.
+//
+// One link, the same for everybody, and safe to post anywhere: it goes to account setup, and
+// setup starts by mailing a one-time code to the address typed into it. An address nobody has
+// approved gets no code, so holding the link grants nothing on its own -- which is why this can
+// be a plain URL rather than a per-person secret that has to be kept and re-issued.
+//
+// It used to copy window.location.origin, with no path at all, which is where the bare
+// https://pm-tool-taupe.vercel.app people were being sent came from.
+const INVITE_PATH = '/welcome';
+
 const CopyInviteLinkButton = () => {
     const [hovered, setHovered] = useState(false);
     const [copied, setCopied] = useState(false);
 
     const copy = async () => {
-        const link = window.location.origin;
+        const link = `${window.location.origin}${INVITE_PATH}`;
         try {
             await navigator.clipboard.writeText(link);
+            toast.success('Setup link copied. Anyone you have approved can use it.');
         } catch {
-            window.prompt('Copy the invite link:', link);
+            window.prompt('Copy the setup link:', link);
             return;
         }
         setCopied(true);
@@ -193,10 +204,11 @@ export default function TeamManagement({ currentUser }: Props) {
     // Nobody hands out 'super_admin' — it only moves via Transfer Ownership — and 'admin' is
     // the super admin's to give. Everything below that is fair game for both.
     //
-    // 'requester' is absent on purpose: it is where someone sits before they join a team, not
-    // a role to assign. Joining a team promotes them out of it, so handing it back to a team
-    // member would just recreate the state the promotion exists to clear. It still shows in
-    // the dropdown for anyone who currently holds it — see the option lists below.
+    // 'requester' and 'invitee' are absent on purpose: they are where someone sits before they
+    // have an account to attach a job to, not roles to assign. Finishing setup promotes them out,
+    // so handing either back to a member would just recreate the state the promotion exists to
+    // clear. Both still show in the dropdown for anyone who currently holds one — see the option
+    // lists below.
     const rolesBelowAdmin = ['team_member', 'team_leader', 'manager'];
     const assignableRoles = currentUser.role === 'super_admin'
         ? [...rolesBelowAdmin, 'admin']
@@ -267,8 +279,16 @@ export default function TeamManagement({ currentUser }: Props) {
     // has taken off a team. They are invisible in the per-team lists, so they get their own.
     const canSeeUnassigned = currentUser.role === 'super_admin' || currentUser.role === 'admin';
 
+    // Access requests now notify managers and team leaders too, and a notification that links to
+    // a page where the thing it is about is invisible is a dead end -- so they can read the queue.
+    // Only the reading is widened: approving and dismissing stay with admins, here and in the
+    // database (resolve_access_request has not moved).
+    const canSeeAccessRequests = canSeeUnassigned
+        || currentUser.role === 'manager'
+        || currentUser.role === 'team_leader';
+
     const loadAccessRequests = useCallback(async () => {
-        if (!canSeeUnassigned) return;
+        if (!canSeeAccessRequests) return;
         const { data, error } = await supabase
             .from('access_requests')
             .select('id, kind, user_id, name, email, note, status, created_at')
@@ -288,7 +308,7 @@ export default function TeamManagement({ currentUser }: Props) {
             status: r.status,
             createdAt: r.created_at
         })));
-    }, [canSeeUnassigned]);
+    }, [canSeeAccessRequests]);
 
     useEffect(() => { loadAccessRequests(); }, [loadAccessRequests]);
 
@@ -302,9 +322,9 @@ export default function TeamManagement({ currentUser }: Props) {
         return true;
     };
 
-    // Invited with no team attached: they set a password, then pick their own team, and stay
-    // a 'requester' until they do. Same path an access request implies for a brand new person
-    // and for somebody whose deleted account is coming back as a new one.
+    // Approval, which is what an invite is here: it mints the auth identity, which is what
+    // makes them an 'invitee' rather than a requester. No team is attached -- they land on the
+    // default one when they finish setup, and step 2 is where they can disagree.
     const inviteFromRequest = async (request: AccessRequest) => {
         setBusyRequestId(request.id);
         try {
@@ -449,11 +469,11 @@ export default function TeamManagement({ currentUser }: Props) {
     const updateMemberRole = async (userId: string, role: string) => {
         if (!role) return false;
         const member = users.find(u => u.id === userId);
-        // An invite nobody has claimed is not a person with a job yet. They hold 'requester'
+        // An invite nobody has claimed is not a person with a job yet. They hold 'invitee'
         // until they set up an account, and set_user_role refuses this too -- for the super
         // admin as much as for anyone -- so this is the readable version of that refusal.
         if (member && !member.onboardingCompleted) {
-            toast.error(`${member.name} has not set up their account yet, so they stay a requester until they do.`);
+            toast.error(`${member.name} has not set up their account yet, so they stay an invitee until they do.`);
             return false;
         }
         if (member?.role === 'super_admin') {
@@ -1240,7 +1260,7 @@ export default function TeamManagement({ currentUser }: Props) {
 
             {/* People asking to be let in, from the login screen. Access requests are new
                 faces; reactivation requests are accounts that were switched off. */}
-            {canSeeUnassigned && accessRequests.length > 0 && (
+            {canSeeAccessRequests && accessRequests.length > 0 && (
                 <div className="bg-white rounded-lg border border-gray-200 p-6">
                     <div className="flex items-center justify-between gap-4 mb-1">
                         <h2 className="text-lg font-semibold text-gray-900">
@@ -1249,9 +1269,10 @@ export default function TeamManagement({ currentUser }: Props) {
                         </h2>
                     </div>
                     <p className="text-sm text-gray-600 mb-4">
-                        Inviting somebody sends them account setup: a name and a password. Finishing that puts
-                        them on the default team as a member. Until they finish, they are a requester and their
-                        role cannot be changed.
+                        Approving somebody turns them from a requester into an invitee: it creates their
+                        account, mails them the setup link, and lets them use the shared one. Setup asks for a
+                        code sent to their address, then a name and a password &mdash; finishing it makes them a
+                        member on the default team. Until then their role cannot be changed.
                     </p>
 
                     <div className="space-y-3">
@@ -1293,7 +1314,11 @@ export default function TeamManagement({ currentUser }: Props) {
                                         </div>
 
                                         <div className="flex items-center gap-2 shrink-0">
-                                            {canReactivate ? (
+                                            {!canSeeUnassigned ? (
+                                                <span className="text-xs text-gray-500 whitespace-nowrap">
+                                                    An admin needs to approve this
+                                                </span>
+                                            ) : canReactivate ? (
                                                 <button
                                                     onClick={() => reactivateFromRequest(request)}
                                                     disabled={busy}
@@ -1309,16 +1334,18 @@ export default function TeamManagement({ currentUser }: Props) {
                                                     className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50"
                                                 >
                                                     {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
-                                                    {isDeleted ? 'Invite as new' : 'Invite'}
+                                                    {isDeleted ? 'Approve as new' : 'Approve'}
                                                 </button>
                                             )}
-                                            <button
-                                                onClick={() => resolveRequest(request.id, 'dismissed')}
-                                                disabled={busy}
-                                                className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
-                                            >
-                                                Dismiss
-                                            </button>
+                                            {canSeeUnassigned && (
+                                                <button
+                                                    onClick={() => resolveRequest(request.id, 'dismissed')}
+                                                    disabled={busy}
+                                                    className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+                                                >
+                                                    Dismiss
+                                                </button>
+                                            )}
                                         </div>
                                     </div>
 
@@ -1374,9 +1401,10 @@ export default function TeamManagement({ currentUser }: Props) {
                         />
                     </div>
                     <p className="text-sm text-gray-600 mb-4">
-                        Invited, but they have not set up an account yet. They stay requesters until they do
+                        Approved, but they have not set up an account yet. They stay invitees until they do
                         &mdash; their role cannot be changed, by anyone &mdash; and they join the default team the
-                        moment they finish. Only admins see this list.
+                        moment they finish. They can use either the link mailed to them or the shared setup link;
+                        both ask for a code sent to their address. Only admins see this list.
                     </p>
 
                     {pendingSetupUsers.length === 0 ? (

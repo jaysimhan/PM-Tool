@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
-import { User, Task } from '../types/types';
+import { User, Task, isPreMember } from '../types/types';
 import { supabase } from '../lib/supabaseClient';
 import { useData } from '../contexts/DataContext';
 import { getDatesInRange } from '../utils/capacityCalculations';
@@ -94,7 +94,7 @@ export default function TimelineView({ currentUser }: Props) {
     // an empty lane is the point of a capacity view, not noise to be hidden.
     const rows = useMemo(() => {
         const named = users
-            .filter(u => u.isActive && !u.deletedAt && u.role !== 'requester')
+            .filter(u => u.isActive && !u.deletedAt && !isPreMember(u.role))
             .filter(u => !memberFilter || u.id === memberFilter)
             .sort((a, b) => a.name.localeCompare(b.name))
             .map(u => ({ id: u.id, name: u.name, tasks: tasksByAssignee[u.id] || [] }));
