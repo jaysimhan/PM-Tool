@@ -237,7 +237,9 @@ export default function TeamManagement({ currentUser }: Props) {
     };
 
     // People the Edit Team modal can pull in directly: everyone not already on this team.
-    // Someone already on another team is still listed but flagged, since membership is exclusive.
+    // Someone already on another team is still listed but flagged, since membership is exclusive,
+    // and so is an unclaimed invite -- the row exists from the moment the invite goes out, so they
+    // are searchable here long before there is a person to put on a team.
     const addMemberCandidates = useMemo(() => {
         if (!actionTeam) return [];
         return users
@@ -245,6 +247,17 @@ export default function TeamManagement({ currentUser }: Props) {
             .filter(u => matchesQuery(u, addMemberSearch))
             .slice(0, 8);
     }, [users, actionTeam, addMemberSearch]);
+
+    // teams and users are two separate fetches over the same team_members table, so refreshing
+    // one without the other renders a member card out of two different moments: the team knows
+    // somebody joined, the users row is still the copy from page load. That reads as a state the
+    // app is not supposed to be able to reach -- a member badged 'Invitee', under the name their
+    // invite was addressed to, with none of the skills they just picked -- and it is only the
+    // screen being half-updated. Anything that re-reads memberships re-reads people too.
+    const refreshTeamsAndPeople = async () => {
+        await refreshTeams();
+        if (refreshUsers) await refreshUsers();
+    };
 
     // Everything below goes through a SECURITY DEFINER function rather than writing to the
     // table: who may remove, deactivate or delete is a rule, and a rule that lives only in
@@ -266,8 +279,7 @@ export default function TeamManagement({ currentUser }: Props) {
                     toast.error(error.message || 'Error removing member.');
                     return;
                 }
-                await refreshTeams();
-                if (refreshUsers) await refreshUsers();
+                await refreshTeamsAndPeople();
                 toast.success('Member removed.');
             }
         );
@@ -436,8 +448,7 @@ export default function TeamManagement({ currentUser }: Props) {
                     toast.error(error.message || `Could not delete ${user.name}.`);
                     return;
                 }
-                await refreshTeams();
-                if (refreshUsers) await refreshUsers();
+                await refreshTeamsAndPeople();
                 toast.success(`${user.name}'s account was deleted.`);
             }
         );
@@ -506,6 +517,16 @@ export default function TeamManagement({ currentUser }: Props) {
         const user = users.find(u => u.id === userId);
         if (!user) return;
 
+        // An unclaimed invite is not somebody who can be put on a team. Joining one is what
+        // promotes a placeholder role, and the database refuses that promotion until setup is
+        // done -- so this would seat an 'invitee' in the member list and leave them there. It
+        // would also decide their team behind their back: complete_onboarding_step_one keeps
+        // whatever team they are already on, so the team the invite named never gets applied.
+        if (!user.onboardingCompleted) {
+            toast.error(`${user.name} has not set up their account yet. They land on a team when they finish.`);
+            return;
+        }
+
         const conflictingTeamId = user.teamIds.find(tid => tid !== actionTeam.id);
         if (conflictingTeamId) {
             const conflictingTeamName = teams.find(t => t.id === conflictingTeamId)?.name || 'another team';
@@ -522,8 +543,7 @@ export default function TeamManagement({ currentUser }: Props) {
             toast.error(`Could not add ${user.name} to ${actionTeam.name}.`);
             return;
         }
-        await refreshTeams();
-        if (refreshUsers) await refreshUsers();
+        await refreshTeamsAndPeople();
         setAddMemberSearch('');
         toast.success(`${user.name} added to ${actionTeam.name}.`);
     };
@@ -538,8 +558,7 @@ export default function TeamManagement({ currentUser }: Props) {
                 console.error('Error transferring ownership:', error);
                 toast.error(error.message || 'Error transferring ownership.');
             } else {
-                await refreshUsers();
-                await refreshTeams();
+                await refreshTeamsAndPeople();
                 setShowTransferOwnership(false);
                 setTransferTargetId('');
                 toast.success(`Ownership transferred to ${target.name}.`);
@@ -558,7 +577,9 @@ export default function TeamManagement({ currentUser }: Props) {
                 console.error('Error deleting team:', error);
                 toast.error('Error deleting team.');
             } else {
-                await refreshTeams();
+                // Deleting a team takes its members off it, and the database demotes and signs
+                // out anyone that leaves teamless -- so the roles on this page have moved too.
+                await refreshTeamsAndPeople();
                 if (selectedTeam === t.id) {
                     setSelectedTeam(teams.find(other => other.id !== t.id)?.id || '');
                 }
@@ -726,8 +747,7 @@ export default function TeamManagement({ currentUser }: Props) {
             toast.success(alertMsg, { duration: 6000 });
         }
 
-        await refreshTeams();
-        if (refreshUsers) await refreshUsers();
+        await refreshTeamsAndPeople();
         setShowInviteMember(false);
         setSelectedInvitees([]);
         setRemovedActiveUsers([]);
@@ -749,7 +769,7 @@ export default function TeamManagement({ currentUser }: Props) {
             console.error('Error creating team:', error);
             toast.error('Error creating team.');
         } else {
-            await refreshTeams();
+            await refreshTeamsAndPeople();
             setShowCreateTeam(false);
             setNewTeamName('');
             setNewTeamDesc('');
@@ -784,7 +804,7 @@ export default function TeamManagement({ currentUser }: Props) {
             console.error('Error updating team:', error);
             toast.error('Error updating team.');
         } else {
-            await refreshTeams();
+            await refreshTeamsAndPeople();
             setShowEditTeam(false);
             toast.success('Team updated.');
         }
@@ -798,7 +818,7 @@ export default function TeamManagement({ currentUser }: Props) {
         } else {
             await supabase.from('team_skills').insert({ team_id: actionTeam.id, skill_id: skillId });
         }
-        await refreshTeams();
+        await refreshTeamsAndPeople();
     };
 
     const handleCreateNewSkill = async () => {
@@ -819,7 +839,7 @@ export default function TeamManagement({ currentUser }: Props) {
         if (data && data[0]) {
             if (refreshSkills) await refreshSkills();
             await supabase.from('team_skills').insert({ team_id: actionTeam.id, skill_id: data[0].id });
-            await refreshTeams();
+            await refreshTeamsAndPeople();
             setNewSkillName('');
             toast.success('Skill created.');
         }
@@ -833,7 +853,7 @@ export default function TeamManagement({ currentUser }: Props) {
                 toast.error('Error deleting skill.');
             } else {
                 if (refreshSkills) await refreshSkills();
-                await refreshTeams();
+                await refreshTeamsAndPeople();
                 toast.success('Skill deleted.');
             }
         });
@@ -1813,6 +1833,15 @@ export default function TeamManagement({ currentUser }: Props) {
                                             <div className="px-3 py-3 text-sm text-gray-500">No matching people.</div>
                                         ) : addMemberCandidates.map(user => {
                                             const otherTeam = teams.find(t => t.id !== actionTeam.id && user.teamIds.includes(t.id));
+                                            // Listed, but not addable. Shown rather than hidden because they are
+                                            // findable everywhere else on this page, and "no matching people" for
+                                            // somebody who is plainly there reads as the search being broken.
+                                            const pendingSetup = !user.onboardingCompleted;
+                                            const blockedBecause = pendingSetup
+                                                ? `${user.name} has not set up their account yet. They land on a team when they finish.`
+                                                : otherTeam
+                                                    ? `Remove ${user.name} from ${otherTeam.name} first`
+                                                    : undefined;
                                             return (
                                                 <div key={user.id} className="flex items-center gap-3 px-3 py-2">
                                                     <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-xs font-medium text-blue-700 shrink-0">
@@ -1822,7 +1851,11 @@ export default function TeamManagement({ currentUser }: Props) {
                                                         <div className="text-sm text-gray-900 truncate">{user.name}</div>
                                                         <div className="text-xs text-gray-500 truncate">{user.email}</div>
                                                     </div>
-                                                    {otherTeam && (
+                                                    {pendingSetup ? (
+                                                        <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">
+                                                            Setup pending
+                                                        </span>
+                                                    ) : otherTeam && (
                                                         <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">
                                                             On {otherTeam.name}
                                                         </span>
@@ -1831,8 +1864,8 @@ export default function TeamManagement({ currentUser }: Props) {
                                                         // Keeps focus in the search box so the list does not close mid-click
                                                         onMouseDown={(e) => e.preventDefault()}
                                                         onClick={() => handleAddExistingMember(user.id)}
-                                                        disabled={!!otherTeam}
-                                                        title={otherTeam ? `Remove ${user.name} from ${otherTeam.name} first` : undefined}
+                                                        disabled={!!blockedBecause}
+                                                        title={blockedBecause}
                                                         className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
                                                     >
                                                         Add
