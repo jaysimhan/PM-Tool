@@ -505,30 +505,35 @@ export function Onboarding() {
                     <h1 className="text-xl font-bold text-gray-900">{heading}</h1>
                     <p className="text-sm text-gray-500 mt-1">{subheading}</p>
 
-                    {/* Three of them wrap on a narrow card, so the connectors are a fixed hair
-                        rather than flex-1 -- a stretching rule either squeezes the labels or
-                        strands one on a line of its own. */}
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-2 my-6">
+                    {/* Label under the circle, not beside it. Three of these side by side do not
+                        fit the card in a row -- the third wrapped onto a line of its own, which
+                        read as a broken layout rather than a third step. Stacked, each step owns a
+                        fixed column and the connectors take whatever is left, so it holds together
+                        at any width and however long the labels get. */}
+                    <div className="flex items-start my-6">
                         {steps.map((s, index) => (
                             <React.Fragment key={s.number}>
-                                <div className="flex items-center gap-1.5">
-                                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-semibold shrink-0 ${
+                                <div className="flex flex-col items-center gap-1.5 w-24 shrink-0">
+                                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${
                                         displayStep > s.number
                                             ? 'bg-green-500 text-white'
                                             : displayStep === s.number
                                                 ? 'bg-blue-600 text-white'
                                                 : 'bg-gray-200 text-gray-500'
                                     }`}>
-                                        {displayStep > s.number ? <Check className="w-3.5 h-3.5" /> : s.number}
+                                        {displayStep > s.number ? <Check className="w-4 h-4" /> : s.number}
                                     </div>
-                                    <span className={`text-xs font-medium whitespace-nowrap ${displayStep >= s.number ? 'text-gray-900' : 'text-gray-400'}`}>
+                                    <span className={`text-[11px] font-medium text-center leading-tight ${displayStep >= s.number ? 'text-gray-900' : 'text-gray-400'}`}>
                                         {s.label}
+                                        {s.optional && (
+                                            <span className="block text-gray-400 font-normal">(optional)</span>
+                                        )}
                                     </span>
-                                    {s.optional && (
-                                        <span className="text-[11px] text-gray-400">(optional)</span>
-                                    )}
                                 </div>
-                                {index < steps.length - 1 && <div className="w-4 h-px bg-gray-200" />}
+                                {/* Sits level with the middle of the circles above the labels. */}
+                                {index < steps.length - 1 && (
+                                    <div className="flex-1 h-px bg-gray-200 mt-3.5" />
+                                )}
                             </React.Fragment>
                         ))}
                     </div>
