@@ -119,6 +119,8 @@ export function TestDataProvider({ children }: { children: React.ReactNode }) {
         refreshClients: noop,
         refreshSkills: noop,
         refreshUsers: noop,
+        refreshAssignments: noop,
+        refreshNotifications: noop,
     }), [dataset, noop]);
 
     if (!inSandbox) return <>{children}</>;

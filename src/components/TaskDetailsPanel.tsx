@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Task, User, Comment, Team, Priority, Tag as TagType } from '../types/types';
-import { supabase } from '../lib/supabaseClient';
+import { Task, User, Comment, Team, Priority, Tag as TagType, TaskActivity, isPreMember } from '../types/types';
+import { supabase, inTestSandbox } from '../lib/supabaseClient';
+import toast from 'react-hot-toast';
+import AcceptTaskModal from './AcceptTaskModal';
 import { useData } from '../contexts/DataContext';
 import { clients, workCategories, teams, tasks as allTasks, mockComments } from '../data/mockData';
 import {
@@ -153,6 +155,11 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     const [localPriority, setLocalPriority] = useState<Priority | undefined>(task?.priority);
     const [localAssignedToId, setLocalAssignedToId] = useState<string | undefined>(task?.assignedToId);
     const [showAssigneePicker, setShowAssigneePicker] = useState(false);
+    const [showAcceptModal, setShowAcceptModal] = useState(false);
+    // One task's history, fetched when the panel opens on it rather than loaded for every
+    // task at sign-in -- it is only ever read one task at a time, and the whole direction of
+    // travel here is away from pulling every row of every table up front.
+    const [activity, setActivity] = useState<TaskActivity[]>([]);
     const assigneePickerRef = useRef<HTMLDivElement>(null);
     const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
     const [showStatusDropdown, setShowStatusDropdown] = useState(false);
@@ -180,7 +187,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     const [localTags, setLocalTags] = useState<TagType[]>(task?.tags || []);
     // users comes from the live data context, not mockData: the assignee and collaborator
     // pickers were reading an array that is empty in every build, so they offered nobody.
-    const { allTags, refreshTags, refreshTasks, regions, users } = useData();
+    const { allTags, refreshTags, refreshTasks, regions, users, assignments, refreshAssignments } = useData();
     const [tagSearchQuery, setTagSearchQuery] = useState('');
     const [editingTag, setEditingTag] = useState<string | null>(null);
     const [editingTagName, setEditingTagName] = useState('');
@@ -334,6 +341,15 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     if (!task) return null;
 
     const assignedUser = localAssignedToId ? users.find(u => u.id === localAssignedToId) : null;
+
+    // Whether the task is waiting on somebody is read from the task, not from the assignment
+    // row: RLS shows a person who does not place work only their own assignments, so for
+    // everyone else that row is not there to be found. The row is what makes the offer
+    // answerable, and only its owner needs it.
+    const awaitingAcceptance = localStatus === 'awaiting_employee_approval';
+    const pendingAssignment = assignments.find(a => a.taskId === task.id && a.status === 'pending');
+    const isMyPendingAssignment = !!pendingAssignment && pendingAssignment.userId === currentUser.id;
+    const pendingAssignee = assignedUser;
     const client = clients.find(c => c.id === task.clientId);
     const category = workCategories.find(c => c.id === task.categoryId);
     const requester = users.find(u => u.id === task.requesterId);
@@ -369,7 +385,11 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     // and team preferences steer automatic assignment and say nothing about who is allowed to
     // be given the task here. With no skill on record — or nobody holding it — the choice
     // stays open rather than leaving the picker empty and the task stuck.
-    const assignableUsers = users.filter(u => !isDormant(u));
+    // Role does not come into it -- an admin or a manager holding the skill takes work like
+    // anyone else. Membership does: an invitee has not set up their account and a requester
+    // never joined, and assign_task refuses both, so offering them here would only produce a
+    // picker whose choices the database rejects.
+    const assignableUsers = users.filter(u => !isDormant(u) && !isPreMember(u.role));
     const skilledUsers = requiredSkillIds.length > 0
         ? assignableUsers.filter(u => (u.skillIds || []).some(id => requiredSkillIds.includes(id)))
         : [];
@@ -387,24 +407,77 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     // Picking someone used to change only this component's copy of the task, so the choice was
     // gone by the next refresh. Manual assignment is the answer to a task the round robin could
     // not place, and it has to survive; who did it and when are recorded with it.
+    // Handing work over is an offer now, not a fact: assign_task writes the task and the
+    // pending assignment together and the trigger tells the person. Doing it here as two
+    // separate writes from the browser is what it replaced -- and the browser could not do it
+    // at all any more, because assignments is closed to the client on purpose.
+    //
+    // Picking yourself is the one case that skips the approval step, and it says so explicitly
+    // rather than letting the database infer it: a round robin that lands on the admin who
+    // started it has not decided anything on their behalf.
     const handleAssign = async (userId?: string) => {
+        const previous = localAssignedToId;
         setLocalAssignedToId(userId);
         task.assignedToId = userId;
         setShowAssigneePicker(false);
         if (!SAVED_TASK_ID.test(task.id)) return;
 
-        const { error } = await supabase.from('tasks').update({
-            assignee_id: userId ?? null,
-            assigned_by_id: userId ? currentUser.id : null,
-            assigned_date: userId ? new Date().toISOString() : null
-        }).eq('id', task.id);
-
-        if (error) {
-            console.error('Could not save the assignee:', error);
+        if (inTestSandbox()) {
+            toast('Assigning is switched off in the test environment.', { icon: '🧪' });
             return;
         }
+
+        const { error } = await supabase.rpc('assign_task', {
+            p_task_id: task.id,
+            p_user_id: userId ?? null,
+            p_auto_accept: userId === currentUser.id
+        });
+
+        if (error) {
+            // Put the picker back where it was; the task was not reassigned.
+            setLocalAssignedToId(previous);
+            task.assignedToId = previous;
+            toast.error(error.message || 'Could not save the assignee.');
+            return;
+        }
+
+        toast.success(
+            !userId ? 'Assignee cleared.'
+                : userId === currentUser.id ? 'Task assigned to you.'
+                : 'Assigned — waiting for them to accept.'
+        );
         refreshTasks();
+        refreshAssignments();
     };
+
+    // Reloaded whenever the panel changes task, and again after an acceptance, which is the
+    // one thing in here that adds to it.
+    const loadActivity = React.useCallback(async () => {
+        if (!task?.id || !SAVED_TASK_ID.test(task.id) || inTestSandbox()) {
+            setActivity([]);
+            return;
+        }
+        const { data, error } = await supabase
+            .from('task_activity')
+            .select('id, task_id, actor_id, type, detail, created_at')
+            .eq('task_id', task.id)
+            .order('created_at', { ascending: true });
+
+        if (error) {
+            console.error('Could not load the task history:', error);
+            return;
+        }
+        setActivity((data || []).map((a: any) => ({
+            id: a.id,
+            taskId: a.task_id,
+            actorId: a.actor_id || undefined,
+            type: a.type,
+            detail: a.detail || {},
+            createdDate: a.created_at
+        })));
+    }, [task?.id]);
+
+    useEffect(() => { loadActivity(); }, [loadActivity]);
 
     const handleMarkComplete = () => {
         const next = localStatus === 'completed' ? 'in_progress' : 'completed';
@@ -914,6 +987,45 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                         {/* ── Scrollable Body ── */}
                         <div className="flex-1 overflow-y-auto bg-gray-50">
                             <div className="p-5 space-y-4">
+
+                                {/* ── Waiting on somebody ──
+                                    The task is on the calendar and in the board, greyed out,
+                                    and this is the panel it opens into. For the person it is
+                                    waiting on, that has to be actionable from here rather
+                                    than only from the approvals page. For everyone else it is
+                                    a plain statement of why the task looks unfinished. */}
+                                {awaitingAcceptance && (
+                                    isMyPendingAssignment && pendingAssignment ? (
+                                        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+                                            <div className="flex items-start justify-between gap-4">
+                                                <div>
+                                                    <div className="text-sm font-semibold text-amber-900">
+                                                        This task is waiting for you
+                                                    </div>
+                                                    <p className="text-xs text-amber-800 mt-0.5">
+                                                        Confirm the deadline and the hours to take it on, or send it
+                                                        back for someone else.
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => setShowAcceptModal(true)}
+                                                    className="flex-shrink-0 px-3 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
+                                                >
+                                                    Accept this task
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="rounded-lg border border-gray-200 bg-white px-4 py-3">
+                                            <div className="text-sm text-gray-600">
+                                                Pending acceptance by{' '}
+                                                <span className="font-medium text-gray-900">
+                                                    {pendingAssignee?.name || 'the assignee'}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    )
+                                )}
 
                                 {/* Priority tag + Task ID */}
                                 <div className="flex items-center gap-2">
@@ -2142,6 +2254,59 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                         </div>
                                                     </div>
                                                 )}
+
+                                                {/* ── What was written down rather than inferred ──
+                                                    The events above are read off the task's own
+                                                    columns. These are the ones the columns cannot
+                                                    tell you about, because the value they refer to
+                                                    has since been overwritten. */}
+                                                {activity.map(event => {
+                                                    if (event.type !== 'estimates_revised_on_accept') return null;
+                                                    const actor = event.actorId ? users.find(u => u.id === event.actorId) : null;
+                                                    const d = event.detail;
+                                                    return (
+                                                        <div key={event.id} className="flex gap-3">
+                                                            <div className="w-7 h-7 rounded-full bg-amber-50 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                                                <Clock className="w-3.5 h-3.5 text-amber-500" />
+                                                            </div>
+                                                            <div className="flex-1 pt-0.5">
+                                                                <p className="text-sm text-gray-600">
+                                                                    <span className="font-medium text-gray-900">{actor?.name || 'The assignee'}</span>
+                                                                    {' '}revised the request on accepting it
+                                                                </p>
+                                                                <ul className="mt-1.5 space-y-1">
+                                                                    {d.estimatedHoursChanged && (
+                                                                        <li className="text-xs text-gray-500">
+                                                                            Estimated hours{' '}
+                                                                            <span className="line-through text-gray-400">
+                                                                                {d.previousEstimatedHours ?? 'not set'}
+                                                                            </span>
+                                                                            {' → '}
+                                                                            <span className="font-medium text-gray-700">{d.newEstimatedHours}</span>
+                                                                            <span className="text-gray-400"> (requested {d.previousEstimatedHours ?? 'nothing'})</span>
+                                                                        </li>
+                                                                    )}
+                                                                    {d.dueDateChanged && (
+                                                                        <li className="text-xs text-gray-500">
+                                                                            Due date{' '}
+                                                                            <span className="line-through text-gray-400">
+                                                                                {d.previousDueDate ? formatDate(String(d.previousDueDate)) : 'not set'}
+                                                                            </span>
+                                                                            {' → '}
+                                                                            <span className="font-medium text-gray-700">
+                                                                                {d.newDueDate ? formatDate(String(d.newDueDate)) : '—'}
+                                                                            </span>
+                                                                            <span className="text-gray-400">
+                                                                                {' '}(requested {d.previousDueDate ? formatDate(String(d.previousDueDate)) : 'nothing'})
+                                                                            </span>
+                                                                        </li>
+                                                                    )}
+                                                                </ul>
+                                                                <p className="text-xs text-gray-400 mt-1">{formatDate(event.createdDate)}</p>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
                                             </>
                                         )}
 
@@ -2342,6 +2507,18 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                     </div>
                 );
             })()}
+
+            {/* The same modal the approvals page opens, so the two routes to accepting a task
+                cannot drift apart on what they ask for. */}
+            {showAcceptModal && pendingAssignment && (
+                <AcceptTaskModal
+                    task={task}
+                    assignment={pendingAssignment}
+                    isOpen={showAcceptModal}
+                    onClose={() => setShowAcceptModal(false)}
+                    onAccepted={() => { setLocalStatus('accepted'); loadActivity(); }}
+                />
+            )}
         </>
     );
 }

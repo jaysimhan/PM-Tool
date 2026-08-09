@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
 import { User, Task, isPreMember } from '../types/types';
-import { supabase } from '../lib/supabaseClient';
+import { supabase, inTestSandbox } from '../lib/supabaseClient';
+import toast from 'react-hot-toast';
 import { useData } from '../contexts/DataContext';
 import { getDatesInRange } from '../utils/capacityCalculations';
 import { TimelineContainer } from './TimelineContainer';
@@ -15,7 +16,7 @@ interface Props {
 type ZoomLevel = 'days' | 'weeks' | 'months';
 
 export default function TimelineView({ currentUser }: Props) {
-    const { users, tasks, refreshTasks } = useData();
+    const { users, tasks, refreshTasks, refreshAssignments } = useData();
     const memberFilter = useMemberFilter();
     const [zoom, setZoom] = useState<ZoomLevel>('days');
     const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
@@ -139,16 +140,43 @@ export default function TimelineView({ currentUser }: Props) {
             newEndDate = nEnd.toISOString().split('T')[0];
         }
 
-        const updates: any = {
+        // The dates first, so that if this drop also changes hands the offer that gets written
+        // carries the schedule the task was just dragged to rather than the one it had.
+        const { error: dateError } = await supabase.from('tasks').update({
             proposed_start_date: newStartDate,
             proposed_end_date: newEndDate,
-        };
-        
-        if (assigneeId && assigneeId !== 'unassigned') {
-            updates.assignee_id = assigneeId;
+        }).eq('id', taskId);
+
+        if (dateError) {
+            toast.error(dateError.message || 'Could not move this task.');
+            return;
         }
 
-        await supabase.from('tasks').update(updates).eq('id', taskId);
+        // Dropping a task on somebody's row hands it to them, and handing work over is an
+        // offer they have to accept -- the same rule the details panel follows. Dropping it
+        // back on the row it was already on only moves the dates, and must not re-ask
+        // somebody who has already said yes.
+        const changesHands =
+            assigneeId && assigneeId !== 'unassigned' && assigneeId !== task.assignedToId;
+
+        if (changesHands) {
+            if (inTestSandbox()) {
+                toast('Assigning is switched off in the test environment.', { icon: '🧪' });
+            } else {
+                const { error } = await supabase.rpc('assign_task', {
+                    p_task_id: taskId,
+                    p_user_id: assigneeId,
+                    p_auto_accept: assigneeId === currentUser.id
+                });
+                if (error) {
+                    toast.error(error.message || 'Could not assign this task.');
+                } else if (assigneeId !== currentUser.id) {
+                    toast.success('Assigned — waiting for them to accept.');
+                }
+                if (refreshAssignments) refreshAssignments();
+            }
+        }
+
         if (refreshTasks) refreshTasks();
     };
 

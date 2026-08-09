@@ -137,6 +137,8 @@ export default function PublicDashboard() {
         refreshClients: noop,
         refreshSkills: noop,
         refreshUsers: noop,
+        refreshAssignments: noop,
+        refreshNotifications: noop,
     }), [payload, noop]);
 
     if (loading) return <PageLoader />;

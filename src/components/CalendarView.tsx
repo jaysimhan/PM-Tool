@@ -37,6 +37,12 @@ type SortOption = 'dueDate' | 'priority' | 'assignee' | 'status' | 'hours' | 'em
 // The filters global search can hand over in the URL, in the order they are read below.
 const FACET_PARAMS = ['assignee', 'brand', 'region', 'tag', 'skill'] as const;
 
+// Offered, not agreed to. It shows on every view -- leaving it off would make a week look
+// emptier than it is -- but faded and dashed, because the person it is waiting on has not
+// said yes and the hours behind it are not committed capacity yet. See .task-pending.
+const isPendingAcceptance = (task: Task) => task.status === 'awaiting_employee_approval';
+const pendingClass = (task: Task) => (isPendingAcceptance(task) ? ' task-pending' : '');
+
 export default function CalendarView({ currentUser }: Props) {
   const { users, teams, tasks, clients, regions, allTags, skills, workCategories, loading } = useData();
   const navigate = useNavigate();
@@ -437,7 +443,8 @@ export default function CalendarView({ currentUser }: Props) {
                       <div
                         key={task.id}
                         onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
-                        className="text-xs p-1.5 rounded cursor-pointer hover:shadow-sm transition-shadow"
+                        title={isPendingAcceptance(task) ? `${task.title} — waiting to be accepted` : task.title}
+                        className={`text-xs p-1.5 rounded cursor-pointer hover:shadow-sm transition-shadow border border-transparent${pendingClass(task)}`}
                         style={{
                           backgroundColor: userTeam?.color ? `${userTeam.color}20` : '#E5E7EB',
                           borderLeft: `3px solid ${userTeam?.color || '#9CA3AF'}`
@@ -518,8 +525,9 @@ export default function CalendarView({ currentUser }: Props) {
                       <div
                         key={task.id}
                         onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
-                        className="text-xs p-2 rounded cursor-pointer hover:shadow-md transition-shadow"
-                        style={{ 
+                        title={isPendingAcceptance(task) ? `${task.title} — waiting to be accepted` : task.title}
+                        className={`text-xs p-2 rounded cursor-pointer hover:shadow-md transition-shadow border border-transparent${pendingClass(task)}`}
+                        style={{
                           backgroundColor: userTeam?.color ? `${userTeam.color}20` : '#E5E7EB',
                           borderLeft: `3px solid ${userTeam?.color || '#9CA3AF'}`
                         }}
@@ -599,7 +607,7 @@ export default function CalendarView({ currentUser }: Props) {
                 <div
                   key={task.id}
                   onClick={() => handleTaskClick(task)}
-                  className="border border-gray-200 rounded-lg p-4 hover:border-blue-300 hover:shadow-sm transition-all cursor-pointer"
+                  className={`border border-gray-200 rounded-lg p-4 hover:border-blue-300 hover:shadow-sm transition-all cursor-pointer${pendingClass(task)}`}
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
@@ -692,7 +700,7 @@ export default function CalendarView({ currentUser }: Props) {
       else if (statusColorCls.includes('gray')) dotColor = '#6B7280';
 
       const row = (
-          <tr key={task.id} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors" onClick={() => handleTaskClick(task)}>
+          <tr key={task.id} className={`border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors${pendingClass(task)}`} onClick={() => handleTaskClick(task)}>
               <td className="px-4 py-3 min-w-[300px]">
                   <div className="flex items-center gap-2" style={{ paddingLeft: `${depth * 24}px` }}>
                       {hasSubtasks ? (
@@ -868,7 +876,7 @@ export default function CalendarView({ currentUser }: Props) {
                                           <div
                                               key={task.id}
                                               onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
-                                              className={`${column.color} border border-gray-200 rounded-lg p-3 cursor-pointer hover:shadow-md transition-shadow`}
+                                              className={`${column.color} border border-gray-200 rounded-lg p-3 cursor-pointer hover:shadow-md transition-shadow${pendingClass(task)}`}
                                           >
                                               <div className="flex items-start gap-2 mb-2">
                                                   <div

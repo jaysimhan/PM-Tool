@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Outlet, NavLink, Link, useNavigate, useLocation } from 'react-router-dom';
 import { Building2, Users, Calendar, ClipboardList, BarChart3, Settings, Menu, Bell, FileText, Link as LinkIcon, LogOut, Shield, Sliders, GanttChart, UserPlus } from 'lucide-react';
-import { User, Notification as AppNotification } from '../types/types';
-import { supabase } from '../lib/supabaseClient';
+import { User, Notification as AppNotification, isPreMember } from '../types/types';
+import { supabase, inTestSandbox } from '../lib/supabaseClient';
 import { useAuth } from '../contexts/AuthContext';
 import { Logo } from '../components/Logo';
 import { GlobalSearch } from '../components/GlobalSearch';
@@ -90,6 +90,52 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
         return () => clearInterval(interval);
     }, [loadNotifications]);
 
+    // Being handed a task is the first notification here worth knowing about within the
+    // minute, so new rows arrive on their own instead of waiting for the next poll. The poll
+    // stays: it is what covers a dropped socket, and re-fetching a list of thirty is cheap.
+    //
+    // The filter is a courtesy to the wire, not the rule -- notifications_select_own is what
+    // stops anyone else's rows reaching this browser, and Realtime honours RLS.
+    //
+    // Not under /test. The sandbox intercepts from/rpc/functions at the client but not
+    // channel(), so a subscription opened there would be the one live connection to
+    // production on a page whose whole premise is invented data.
+    useEffect(() => {
+        if (inTestEnvironment || inTestSandbox()) return;
+
+        const channel = supabase
+            .channel(`notifications:${currentUser.id}`)
+            .on(
+                'postgres_changes',
+                {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'notifications',
+                    filter: `user_id=eq.${currentUser.id}`
+                },
+                payload => {
+                    const row = payload.new as any;
+                    setNotifications(prev => {
+                        // The poll and the socket can both deliver the same row.
+                        if (prev.some(n => n.id === row.id)) return prev;
+                        return [{
+                            id: row.id,
+                            userId: row.user_id,
+                            type: row.type,
+                            title: row.title,
+                            message: row.message,
+                            link: row.link || undefined,
+                            isRead: row.is_read === true,
+                            createdDate: row.created_at
+                        }, ...prev];
+                    });
+                }
+            )
+            .subscribe();
+
+        return () => { supabase.removeChannel(channel); };
+    }, [currentUser.id, inTestEnvironment]);
+
     const markAllRead = async () => {
         const unread = notifications.filter(n => !n.isRead).map(n => n.id);
         if (unread.length === 0) return;
@@ -145,7 +191,11 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
         items.push({ id: 'workload', label: 'Workload', icon: Users });
         items.push({ id: 'tasks', label: 'Tasks', icon: Calendar });
 
-        if (currentUser.role === 'team_member' || currentUser.role === 'team_leader') {
+        // Work goes round the team on skill, not on rank -- a manager or an admin who holds
+        // the skill is in the rotation like anybody else, and gets offered tasks like anybody
+        // else. This used to be team members and team leaders only, which left everyone above
+        // them with assignments waiting and no screen that showed them.
+        if (!isPreMember(currentUser.role)) {
             items.push({ id: 'approval', label: 'Task Approval', icon: ClipboardList });
         }
 
@@ -262,10 +312,18 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                                 </div>
                                             ) : (
                                                 notifications.map(notification => (
-                                                    <button
+                                                    <div
                                                         key={notification.id}
+                                                        role="button"
+                                                        tabIndex={0}
                                                         onClick={() => openNotification(notification)}
-                                                        className={`w-full text-left px-4 py-3 border-b border-gray-50 last:border-b-0 hover:bg-gray-50 transition-colors ${
+                                                        onKeyDown={e => {
+                                                            if (e.key === 'Enter' || e.key === ' ') {
+                                                                e.preventDefault();
+                                                                openNotification(notification);
+                                                            }
+                                                        }}
+                                                        className={`w-full text-left px-4 py-3 border-b border-gray-50 last:border-b-0 hover:bg-gray-50 cursor-pointer transition-colors ${
                                                             notification.isRead ? '' : 'bg-blue-50/50'
                                                         }`}
                                                     >
@@ -285,9 +343,24 @@ export function DashboardLayout({ currentUser }: DashboardLayoutProps) {
                                                                         day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
                                                                     })}
                                                                 </div>
+                                                                {/* The row already opens the task itself. This is for the
+                                                                    reader who would rather see everything waiting on them
+                                                                    at once than answer them one notification at a time. */}
+                                                                {notification.type === 'task_assignment' && (
+                                                                    <button
+                                                                        onClick={e => {
+                                                                            e.stopPropagation();
+                                                                            setShowNotifications(false);
+                                                                            navigate(navPath('approval'));
+                                                                        }}
+                                                                        className="mt-2 px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100 transition-colors"
+                                                                    >
+                                                                        Review all approvals
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                         </div>
-                                                    </button>
+                                                    </div>
                                                 ))
                                             )}
                                         </div>

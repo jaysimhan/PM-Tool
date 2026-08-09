@@ -37,6 +37,17 @@
   }
 }
 
+/* A task somebody has been offered but has not accepted yet. It is on the calendar because
+   hiding it would make the day look emptier than it is, and it is faded because nobody has
+   agreed to do it -- planning around it as though they had is the mistake this prevents.
+   The dashes carry the meaning where colour cannot. */
+.task-pending {
+  opacity: 0.55;
+  border-style: dashed !important;
+  border-color: #9ca3af !important;
+  filter: grayscale(45%);
+}
+
 @layer base {
   select:not([multiple]) {
     appearance: none;

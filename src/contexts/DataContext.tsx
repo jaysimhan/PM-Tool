@@ -24,7 +24,52 @@ export interface DataContextType {
     refreshClients: () => Promise<void>;
     refreshSkills: () => Promise<void>;
     refreshUsers: () => Promise<void>;
+    refreshAssignments: () => Promise<void>;
+    refreshNotifications: () => Promise<void>;
 }
+
+// Rows in the shape the database hands them over, mapped once here so nothing downstream has
+// to know both spellings.
+const toAssignment = (a: any): Assignment => ({
+    id: a.id,
+    taskId: a.task_id,
+    userId: a.user_id,
+    status: a.status,
+    assignedDate: a.assigned_date,
+    assignedById: a.assigned_by_id || undefined,
+    responseDate: a.response_date || undefined,
+    proposedStartDate: a.proposed_start_date || undefined,
+    proposedEndDate: a.proposed_end_date || undefined,
+    estimatedHours: a.estimated_hours ?? undefined,
+    rejectionReason: a.rejection_reason || undefined
+});
+
+const toNotification = (n: any): Notification => ({
+    id: n.id,
+    userId: n.user_id,
+    type: n.type,
+    title: n.title,
+    message: n.message,
+    createdDate: n.created_at,
+    isRead: n.is_read === true,
+    link: n.link || undefined
+});
+
+const toWorkCategory = (c: any): WorkCategory => ({
+    id: c.id,
+    name: c.name,
+    defaultHours: c.default_hours ?? 0,
+    icon: c.icon || undefined,
+    isActive: c.is_active !== false,
+    teamIds: [],
+    skillIds: []
+});
+
+const ASSIGNMENT_COLUMNS =
+    'id, task_id, user_id, status, assigned_date, assigned_by_id, response_date, ' +
+    'proposed_start_date, proposed_end_date, estimated_hours, rejection_reason';
+
+const NOTIFICATION_COLUMNS = 'id, user_id, type, title, message, created_at, is_read, link';
 
 // Exported so the test environment can re-provide it with invented data — see
 // TestDataProvider. Nothing else should reach past useData() to touch it.
@@ -63,7 +108,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 { data: teamSkillsData },
                 { data: userSkillsData },
                 { data: userClientsData },
-                { data: userRegionsData }
+                { data: userRegionsData },
+                { data: workCategoriesData },
+                { data: assignmentsData },
+                { data: notificationsData }
             ] = await Promise.all([
                 supabase.from('users').select('*'),
                 supabase.from('teams').select('*'),
@@ -82,7 +130,22 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 supabase.from('team_skills').select('*'),
                 supabase.from('user_skills').select('*'),
                 supabase.from('user_clients').select('*'),
-                supabase.from('user_regions').select('*')
+                supabase.from('user_regions').select('*'),
+                // The categories every task carries a category_id for. The table has always
+                // been here and the type has always been on the context; the query was
+                // missing, so workCategories arrived empty and every screen that names a
+                // task's category showed a blank.
+                supabase.from('work_categories').select('id, name, default_hours, icon, is_active'),
+                // Whose offer is outstanding, and what was agreed when one was accepted. RLS
+                // narrows this to the caller's own rows unless they place work.
+                supabase.from('assignments').select(ASSIGNMENT_COLUMNS),
+                // Addressed to this person by RLS as well; the filter is what keeps the reply
+                // small rather than what keeps it private.
+                supabase.from('notifications')
+                    .select(NOTIFICATION_COLUMNS)
+                    .eq('user_id', session!.user.id)
+                    .order('created_at', { ascending: false })
+                    .limit(50)
             ]);
 
             if (usersData) {
@@ -193,6 +256,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
                 })) as unknown as Comment[];
                 setComments(transformedComments);
             }
+            if (workCategoriesData) setWorkCategories(workCategoriesData.map(toWorkCategory));
+            if (assignmentsData) setAssignments(assignmentsData.map(toAssignment));
+            if (notificationsData) setNotifications(notificationsData.map(toNotification));
         } catch (error) {
             console.error('Error fetching data from Supabase:', error);
         } finally {
@@ -349,6 +415,22 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
+    const refreshAssignments = async () => {
+        const { data } = await supabase.from('assignments').select(ASSIGNMENT_COLUMNS);
+        if (data) setAssignments(data.map(toAssignment));
+    };
+
+    const refreshNotifications = async () => {
+        if (!session?.user?.id) return;
+        const { data } = await supabase
+            .from('notifications')
+            .select(NOTIFICATION_COLUMNS)
+            .eq('user_id', session.user.id)
+            .order('created_at', { ascending: false })
+            .limit(50);
+        if (data) setNotifications(data.map(toNotification));
+    };
+
     // Keyed on the session, not on mount.
     //
     // Every table here is behind RLS now, so a request made before the session has been
@@ -367,6 +449,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             setComments([]);
             setAllTags([]);
             setRegions([]);
+            // Notifications are addressed to one person and assignments say what they were
+            // asked to do, so these are the last two that may survive a sign-out.
+            setWorkCategories([]);
+            setAssignments([]);
+            setNotifications([]);
+            setLeaves([]);
             setLoading(false);
             return;
         }
@@ -376,7 +464,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return (
         <DataContext.Provider value={{
             users, teams, skills, workCategories, clients, tasks, 
-            leaves, assignments, notifications, comments, allTags, regions, loading, refreshTasks, refreshTeams, refreshTags, refreshRegions, refreshClients, refreshSkills, refreshUsers
+            leaves, assignments, notifications, comments, allTags, regions, loading, refreshTasks, refreshTeams, refreshTags, refreshRegions, refreshClients, refreshSkills, refreshUsers,
+            refreshAssignments, refreshNotifications
         }}>
             {children}
         </DataContext.Provider>

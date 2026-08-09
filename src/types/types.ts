@@ -211,6 +211,34 @@ export interface Notification {
     link?: string;
 }
 
+/**
+ * Something that happened to a task, written down because the task's own columns cannot imply
+ * it. The first of these is the assignee revising the deadline or the hours on the way to
+ * accepting: those figures are overwritten in place, so without a record the numbers the
+ * requester actually asked for are gone.
+ *
+ * Written only by definer functions in the database — see the task acceptance migration —
+ * which is what makes it a history rather than a field anyone can rewrite.
+ */
+export interface TaskActivity {
+    id: string;
+    taskId: string;
+    actorId?: string;
+    type: 'estimates_revised_on_accept' | string;
+    detail: TaskActivityDetail;
+    createdDate: string;
+}
+
+export interface TaskActivityDetail {
+    dueDateChanged?: boolean;
+    previousDueDate?: string | null;
+    newDueDate?: string | null;
+    estimatedHoursChanged?: boolean;
+    previousEstimatedHours?: number | null;
+    newEstimatedHours?: number | null;
+    [key: string]: unknown;
+}
+
 export interface AuditLog {
     id: string;
     userId: string;
