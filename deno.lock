@@ -1,0 +1,45 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@supabase/supabase-js@2": "2.111.0"
+  },
+  "jsr": {
+    "@supabase/supabase-js@2.111.0": {
+      "integrity": "92cd1d4c2933f6a62099f7d3b2b91908b70a9d110ee6098e1b2d3db2e6b7ef1b"
+    }
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@huggingface/transformers@^4.2.0",
+        "npm:@supabase/supabase-js@^2.111.0",
+        "npm:@tailwindcss/postcss@^4.3.3",
+        "npm:@types/node@^26.1.2",
+        "npm:@types/pg@^8.20.0",
+        "npm:@types/react-dom@^19.2.3",
+        "npm:@types/react@^19.2.17",
+        "npm:@vitejs/plugin-react@^6.0.4",
+        "npm:asana@^3.1.12",
+        "npm:autoprefixer@^10.5.4",
+        "npm:date-fns@^4.4.0",
+        "npm:dotenv@^17.4.2",
+        "npm:framer-motion@^12.43.0",
+        "npm:glob@^13.0.6",
+        "npm:lucide-react@^1.27.0",
+        "npm:pg@^8.22.0",
+        "npm:postcss@^8.5.24",
+        "npm:react-dom@^19.2.8",
+        "npm:react-hot-toast@^2.6.0",
+        "npm:react-router-dom@^7.18.2",
+        "npm:react-router@^7.18.2",
+        "npm:react@^19.2.8",
+        "npm:recharts@^3.10.1",
+        "npm:tailwindcss@^4.3.3",
+        "npm:ts-node@^10.9.2",
+        "npm:tsx@^4.23.1",
+        "npm:typescript@^7.0.2",
+        "npm:vite@^8.1.5"
+      ]
+    }
+  }
+}

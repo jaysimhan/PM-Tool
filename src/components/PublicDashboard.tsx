@@ -1,44 +1,42 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { captureOperationalError, recordOperationalTiming } from '../lib/observability';
 import { useParams } from 'react-router-dom';
 import OrganizationDashboard from './OrganizationDashboard';
 import { DataContext, DataContextType } from '../contexts/DataContext';
 import { supabase } from '../lib/supabaseClient';
-import { Client, Region, Tag, Task, Team, User } from '../types/types';
+import { Client, Region, Tag, Team, User } from '../types/types';
+import { toSnapshot, type MetricMap, type SnapshotWindow } from '../lib/dashboardStats';
 import { Logo } from './Logo';
 
 /**
  * What the shareable link from "Share Dashboard" opens: /public/dashboard/<token>.
  *
  * Nobody here is signed in, so there is no DataContext worth reading — every table is closed
- * to the anon key. get_public_dashboard(token) is the whole data source, and it hands back
- * only what the charts plot: statuses, dates, volumes, and the names of teams, brands,
- * regions and tags. No task titles and no people.
+ * to the anon key. get_public_dashboard_cached(token) is the whole data source.
  *
- * That payload is then re-provided as a DataContext so OrganizationDashboard, which is the
- * same component the signed-in dashboard renders, needs to know none of this.
+ * It used to be get_public_dashboard, which aggregated the entire tasks table live and shipped
+ * every task — id, status, dates, hours, brand, region, tags, teams — to the browser to be
+ * counted there. That ran per visitor, on a URL whose only credential is a token that may have
+ * been forwarded to anyone, with a cost that grew with the organisation. The cached function
+ * returns last night's counts instead: a few dozen numbers and the names to label them, a
+ * fixed size no matter how much work the organisation is doing, and not one task row.
+ *
+ * The names still go through a DataContext because OrganizationDashboard reads teams, brands,
+ * regions and tags from there for its axes. The numbers are passed as a prop.
  */
 
 interface PublicPayload {
     ok: boolean;
     reason?: 'not_found' | 'closed';
     publicAccess?: boolean;
-    teams?: { id: string; name: string; color: string; memberIds: string[] }[];
-    members?: { id: string; dailyCapacity: number }[];
+    /** True when the nightly job has not produced a complete day yet. */
+    pending?: boolean;
+    asOf?: string;
+    metrics?: MetricMap;
+    teams?: { id: string; name: string; color: string }[];
     clients?: Client[];
     regions?: Region[];
     tags?: Tag[];
-    tasks?: {
-        id: string;
-        status: string;
-        createdDate: string;
-        dueDate: string;
-        estimatedHours: number;
-        assigned: boolean;
-        clientId: string | null;
-        regionId: string | null;
-        tagIds: string[];
-        teamIds: string[];
-    }[];
 }
 
 const PageLoader = () => (
@@ -73,9 +71,14 @@ export default function PublicDashboard() {
         let cancelled = false;
 
         (async () => {
-            const { data, error: rpcError } = await supabase.rpc('get_public_dashboard', { p_token: token });
+            const startedAt = performance.now();
+            const { data, error: rpcError } = await supabase.rpc('get_public_dashboard_cached', { p_token: token });
+            recordOperationalTiming('dashboard_rpc', performance.now() - startedAt, { rpc: 'cached_public_dashboard' });
             if (cancelled) return;
-            if (rpcError) setError(rpcError.message);
+            if (rpcError) {
+                captureOperationalError('dashboard_rpc', rpcError, { rpc: 'cached_public_dashboard' });
+                setError(rpcError.message);
+            }
             else setPayload(data as PublicPayload);
             setLoading(false);
         })();
@@ -85,44 +88,22 @@ export default function PublicDashboard() {
 
     const noop = useCallback(async () => {}, []);
 
-    // The shapes the dashboard reads, filled from the payload and left empty everywhere else:
-    // a signed-out visitor gets no comments, no skills and no leave, and the page plots none
-    // of them. Members carry an id and a capacity and nothing else, which is all the team
-    // capacity bars are summing.
+    // Labels only. There are no users and no tasks in this payload any more — the team
+    // capacity bars read their member counts and hours out of the snapshot instead, so a
+    // signed-out visitor never receives a person's id at all, not even an opaque one.
     const value = useMemo<DataContextType>(() => ({
-        users: (payload?.members || []).map(m => ({
-            id: m.id,
-            name: '',
-            email: '',
-            role: 'team_member',
-            skillIds: [],
-            clientIds: [],
-            regionIds: [],
-            teamIds: [],
-            dailyCapacity: m.dailyCapacity,
-            isActive: true,
-            onboardingCompleted: true,
-            deletedAt: null,
-        })) as unknown as User[],
+        users: [] as User[],
         teams: (payload?.teams || []).map(t => ({
             id: t.id,
             name: t.name,
             color: t.color,
-            memberIds: t.memberIds || [],
+            memberIds: [],
             skillIds: [],
         })) as unknown as Team[],
         skills: [],
         workCategories: [],
         clients: payload?.clients || [],
-        tasks: (payload?.tasks || []).map(t => ({
-            ...t,
-            // Only ever read as "is this assigned to anybody", and the answer arrived as a
-            // boolean precisely so the identity never left the database.
-            assignedToId: t.assigned ? 'assigned' : undefined,
-            tags: (t.tagIds || [])
-                .map(id => (payload?.tags || []).find(g => g.id === id))
-                .filter(Boolean),
-        })) as unknown as Task[],
+        tasks: [],
         leaves: [],
         assignments: [],
         notifications: [],
@@ -130,6 +111,11 @@ export default function PublicDashboard() {
         allTags: payload?.tags || [],
         regions: payload?.regions || [],
         loading: false,
+        loadIssues: [],
+        retryDataLoad: noop,
+        hasMoreTasks: false,
+        loadingMoreTasks: false,
+        loadMoreTasks: noop,
         refreshTasks: noop,
         refreshTeams: noop,
         refreshTags: noop,
@@ -140,6 +126,15 @@ export default function PublicDashboard() {
         refreshAssignments: noop,
         refreshNotifications: noop,
     }), [payload, noop]);
+
+    // The numbers, in the same shape the signed-in dashboard reads from the snapshot table.
+    // One day only: a shared link is a headline, not an analysis tool, so there is no range
+    // control and no trend series behind it.
+    const snapshotWindow = useMemo<SnapshotWindow>(() => ({
+        latest: toSnapshot(payload?.asOf || null, payload?.metrics || {}),
+        series: [],
+        pending: payload?.pending === true,
+    }), [payload]);
 
     if (loading) return <PageLoader />;
 
@@ -182,7 +177,7 @@ export default function PublicDashboard() {
                             are signed in as an admin; the link shows nothing to anyone else.
                         </div>
                     )}
-                    <OrganizationDashboard currentUser={null as any} isPublic={true} />
+                    <OrganizationDashboard currentUser={null as any} isPublic={true} snapshot={snapshotWindow} />
                 </div>
             </div>
         </DataContext.Provider>

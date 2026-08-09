@@ -247,11 +247,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 // maybeSingle, not single: an invited user who has authenticated but not yet
                 // finished onboarding has no profile row, and that is not an error -- it is
                 // what sends them to /welcome.
-                supabase.from('users').select('*').eq('id', userId).maybeSingle(),
-                supabase.from('team_members').select('team_id').eq('user_id', userId),
-                supabase.from('user_skills').select('skill_id').eq('user_id', userId),
-                supabase.from('user_clients').select('client_id').eq('user_id', userId),
-                supabase.from('user_regions').select('region_id').eq('user_id', userId)
+                supabase.from('users')
+                    .select('id, name, email, role, daily_capacity, avatar, is_active, onboarding_completed, deleted_at, sessions_revoked_at')
+                    .eq('id', userId)
+                    .maybeSingle(),
+                supabase.from('team_members').select('team_id').eq('user_id', userId).throwOnError(),
+                supabase.from('user_skills').select('skill_id').eq('user_id', userId).throwOnError(),
+                supabase.from('user_clients').select('client_id').eq('user_id', userId).throwOnError(),
+                supabase.from('user_regions').select('region_id').eq('user_id', userId).throwOnError()
             ]);
 
             if (error) throw error;

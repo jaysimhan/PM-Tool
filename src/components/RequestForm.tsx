@@ -6,7 +6,7 @@ import { useData } from '../contexts/DataContext';
 import { SingleDatePicker } from './SingleDatePicker';
 import { format } from 'date-fns';
 import { getRandomColor } from '../utils/colors';
-import { embedText, warmEmbeddingModel } from '../utils/embeddings';
+import { embedText } from '../utils/embeddings';
 import { CustomFieldInput } from './CustomFieldInput';
 import { CustomizeFormModal } from './CustomizeFormModal';
 import {
@@ -133,12 +133,6 @@ export default function RequestForm({ currentUser }: Props) {
             ...pruneCustomValues(prev, visibleCustomFields),
         }));
     }, [visibleCustomFields]);
-
-    // Kick off the embedding model download as soon as the form mounts so the
-    // first keystroke in Work Category doesn't pay the cold-start cost.
-    useEffect(() => {
-        warmEmbeddingModel();
-    }, []);
 
     useEffect(() => {
         const query = categorySearch.trim();

@@ -3,16 +3,36 @@ import { User, Task } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { supabase } from '../lib/supabaseClient';
 import { AlertCircle, CheckCircle, Clock, TrendingUp, Users as UsersIcon, Briefcase, Tag, Globe, Grid, Share2 } from 'lucide-react';
-import { getStatusBadgeColor, formatStatusLabel, getPriorityColor } from '../utils/capacityCalculations';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
+import { getStatusBadgeColor, formatStatusLabel, getPriorityColor, isTaskOverdue, isTaskDueSoon } from '../utils/capacityCalculations';
 import toast from 'react-hot-toast';
 import DistributionChart from './DistributionChart';
 import StatusComparisonChart from './StatusComparisonChart';
+import TrendChart from './TrendChart';
+import AdminEmergentNeeds from './AdminEmergentNeeds';
+import TaskActionWidget from './TaskActionWidget';
+import {
+    fetchSnapshotWindow, EMPTY_SNAPSHOT, EMPTY_STAGES,
+    type SnapshotWindow, type TimeRange, type StageCounts,
+} from '../lib/dashboardStats';
 
 interface Props {
     currentUser: User;
     isPublic?: boolean;
+    /**
+     * Supplied by PublicDashboard, which gets the same figures from get_public_dashboard_cached
+     * because a signed-out visitor cannot read daily_kpi_snapshots directly. When absent the
+     * component reads the table itself.
+     */
+    snapshot?: SnapshotWindow;
 }
+
+const RANGE_LABELS: Record<TimeRange, string> = {
+    week: 'Past week',
+    month: 'Past month',
+    quarter: 'Past quarter',
+    year: 'Past year',
+    lifetime: 'All time',
+};
 
 // Public dashboard shows a rolling window of teams: one slot swaps out at a time
 // so every team gets airtime without the card growing past four rows.
@@ -20,10 +40,43 @@ const VISIBLE_TEAM_SLOTS = 4;
 const TEAM_ROTATE_INTERVAL_MS = 4500;
 const TEAM_SWAP_EXIT_MS = 400;
 
-export default function OrganizationDashboard({ currentUser, isPublic }: Props) {
-    const { tasks: allTasks, teams, users, clients, regions, allTags } = useData();
-    const [timeRange, setTimeRange] = useState<'week' | 'month' | 'quarter' | 'year' | 'lifetime'>('lifetime');
+export default function OrganizationDashboard({ currentUser, isPublic, snapshot: providedSnapshot }: Props) {
+    // Teams, brands, regions and tags are still read from the context: they are the labels on
+    // the axes, they are small, and they are the same for everybody. What is NOT read here any
+    // more is `tasks` -- this page used to count every task in the organisation on every
+    // render, for every viewer, and that is now done once a night by aggregate_daily_kpis.
+    const { teams, clients, regions, allTags } = useData();
+    const [timeRange, setTimeRange] = useState<TimeRange>('month');
     const [sharing, setSharing] = useState(false);
+
+    // The public dashboard is this same component behind a token, and it gets its numbers
+    // from the cached RPC rather than from the table, so it passes them in.
+    const [fetched, setFetched] = useState<SnapshotWindow | null>(null);
+    const [loading, setLoading] = useState(!providedSnapshot);
+    const [loadError, setLoadError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (providedSnapshot) return;
+        let cancelled = false;
+        setLoading(true);
+        setLoadError(null);
+
+        fetchSnapshotWindow(timeRange)
+            .then(result => { if (!cancelled) setFetched(result); })
+            .catch(err => {
+                if (cancelled) return;
+                setLoadError(err?.message || 'Could not load the dashboard figures.');
+            })
+            .finally(() => { if (!cancelled) setLoading(false); });
+
+        return () => { cancelled = true; };
+    }, [timeRange, providedSnapshot]);
+
+    const window_ = providedSnapshot || fetched;
+    const snapshot = window_?.latest || EMPTY_SNAPSHOT;
+    const series = window_?.series || [];
+    const pending = window_?.pending ?? false;
+    const stats = snapshot.stats;
 
     // The link is minted server-side and the token in it is the credential a signed-out
     // visitor arrives with, so the URL cannot be assembled here -- the first admin to press
@@ -49,75 +102,22 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
         }
     };
 
-    const tasks = useMemo(() => {
-        if (timeRange === 'lifetime') return allTasks;
-        
-        const now = new Date();
-        const past = new Date();
-        switch (timeRange) {
-            case 'week':
-                past.setDate(now.getDate() - 7);
-                break;
-            case 'month':
-                past.setMonth(now.getMonth() - 1);
-                break;
-            case 'quarter':
-                past.setMonth(now.getMonth() - 3);
-                break;
-            case 'year':
-                past.setFullYear(now.getFullYear() - 1);
-                break;
-        }
-        
-        return allTasks.filter(t => new Date(t.createdDate) >= past);
-    }, [allTasks, timeRange]);
-
-    // Calculate statistics
-    const stats = {
-        totalRequests: tasks.length,
-        newRequests: tasks.filter(t => t.status === 'new_request' || t.status === 'awaiting_assignment').length,
-        activeTasks: tasks.filter(t =>
-            t.status === 'in_progress' ||
-            t.status === 'scheduled' ||
-            t.status === 'accepted'
-        ).length,
-        unassignedTasks: tasks.filter(t => !t.assignedToId).length,
-        inReview: tasks.filter(t => t.status === 'in_review').length,
-        overdueTasks: tasks.filter(t => {
-            if (t.status === 'completed' || t.status === 'cancelled') return false;
-            return new Date(t.dueDate) < new Date('2026-07-28');
-        }).length,
-        dueSoon: tasks.filter(t => {
-            if (t.status === 'completed' || t.status === 'cancelled') return false;
-            const dueDate = new Date(t.dueDate);
-            const today = new Date('2026-07-28');
-            const threeDaysFromNow = new Date(today);
-            threeDaysFromNow.setDate(today.getDate() + 3);
-            return dueDate >= today && dueDate <= threeDaysFromNow;
-        }).length,
-        completed: tasks.filter(t => t.status === 'completed').length
-    };
-
-    // Team workload summary
-    const teamWorkload = teams.map(team => {
-        const teamTasks = tasks.filter(t =>
-            t.teamIds?.includes(team.id) &&
-            (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
-        );
-        const teamMembers = users.filter(u => team.memberIds.includes(u.id));
-        const totalCapacity = teamMembers.reduce((sum, u) => sum + u.dailyCapacity, 0);
-        const scheduledHours = teamTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
-
+    // Team utilisation, read from the snapshot rather than recomputed. The arithmetic behind
+    // it is unchanged -- outstanding hours against a week of the team's capacity -- it just
+    // happens in aggregate_daily_kpis now, where it runs once instead of per viewer.
+    const teamWorkload = useMemo(() => teams.map(team => {
+        const capacity = snapshot.teamCapacity[team.id];
+        const weekly = (capacity?.totalCapacity || 0) * 5;
         return {
             team,
-            taskCount: teamTasks.length,
-            memberCount: teamMembers.length,
-            utilization: totalCapacity > 0 ? (scheduledHours / (totalCapacity * 5)) * 100 : 0 // Rough weekly estimate
+            taskCount: capacity?.taskCount || 0,
+            memberCount: capacity?.memberCount || 0,
+            utilization: weekly > 0 ? ((capacity?.scheduledHours || 0) / weekly) * 100 : 0,
         };
-    });
+    }), [teams, snapshot.teamCapacity]);
 
-    // Rolling window of teams for the public dashboard
-    const rotateTeams = !!isPublic && teamWorkload.length > VISIBLE_TEAM_SLOTS;
+    // Rolling window of teams (rotates automatically if there are more than VISIBLE_TEAM_SLOTS)
+    const rotateTeams = teamWorkload.length > VISIBLE_TEAM_SLOTS;
     const teamIdsKey = teamWorkload.map(({ team }) => team.id).join('|');
     const teamIdsRef = useRef<string[]>([]);
     teamIdsRef.current = teamWorkload.map(({ team }) => team.id);
@@ -172,76 +172,57 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
             .filter((entry): entry is typeof teamWorkload[number] => Boolean(entry))
         : teamWorkload;
 
-    // Recent tasks requiring attention
-    const tasksRequiringAttention = tasks
-        .filter(t =>
-            t.status === 'manager_review_required' ||
-            t.status === 'awaiting_employee_approval' ||
-            (t.status !== 'completed' && new Date(t.dueDate) < new Date('2026-07-28'))
-        )
-        .slice(0, 5);
+    // The five stages, per dimension member. These used to be four passes over every task per
+    // dimension -- clients × tasks, regions × tasks, tags × tasks, teams × tasks, on every
+    // render -- and are now a lookup into the snapshot the database already grouped.
+    //
+    // task_stage() in the migration holds the same status groupings this component used to
+    // define inline, so the buckets are identical; the definition just lives in one place now.
+    const stagesFor = (map: Record<string, StageCounts>, id: string): StageCounts =>
+        map[id] || EMPTY_STAGES;
 
-    // Work by category
-    const categoryStats = tasks.reduce((acc, task) => {
-        const category = task.categoryId;
-        if (!acc[category]) {
-            acc[category] = { total: 0, active: 0, completed: 0 };
-        }
-        acc[category].total++;
-        if (task.status === 'in_progress' || task.status === 'scheduled' || task.status === 'accepted') {
-            acc[category].active++;
-        }
-        if (task.status === 'completed') {
-            acc[category].completed++;
-        }
-        return acc;
-    }, {} as Record<string, { total: number; active: number; completed: number }>);
+    const statusData = useMemo(() => [
+        { name: 'New Request', count: snapshot.stages.NewRequests, color: '#9CA3AF' },
+        { name: 'Planning', count: snapshot.stages.Planning, color: '#A855F7' },
+        { name: 'In Progress', count: snapshot.stages.InProgress, color: '#3B82F6' },
+        { name: 'In Review', count: snapshot.stages.InReview, color: '#EAB308' },
+        { name: 'On Hold', count: snapshot.stages.OnHold, color: '#EF4444' },
+        { name: 'Completed', count: snapshot.stages.Completed, color: '#10B981' },
+    ], [snapshot.stages]);
 
-    // Group statuses according to the 5 stages
-    const getTaskCounts = (filteredTasks: Task[]) => {
-        return {
-            NewRequests: filteredTasks.filter(t => t.status === 'new_request' || t.status === 'awaiting_assignment').length,
-            Planning: filteredTasks.filter(t => t.status === 'scheduled' || t.status === 'manager_review_required' || t.status === 'awaiting_employee_approval' || t.status === 'provisional_assignment' || t.status === 'accepted').length,
-            InProgress: filteredTasks.filter(t => t.status === 'in_progress' || t.status === 'changes_requested').length,
-            InReview: filteredTasks.filter(t => t.status === 'in_review').length,
-            OnHold: filteredTasks.filter(t => t.status === 'on_hold' || t.status === 'blocked' || t.status === 'waiting_for_information' || t.status === 'waiting_for_approval').length,
-            Completed: filteredTasks.filter(t => t.status === 'completed').length, // Excluding cancelled from the graph
-            Total: filteredTasks.length
-        };
-    };
+    const brandData = useMemo(
+        () => clients.slice(0, 8).map(client => ({
+            name: client.name, favicon: (client as any).favicon, ...stagesFor(snapshot.byClient, client.id),
+        })),
+        [clients, snapshot.byClient]
+    );
 
-    // Chart Data Preparations
-    const statusData = useMemo(() => {
-        const counts = getTaskCounts(tasks);
-        return [
-            { name: 'New Request', count: counts.NewRequests, color: '#9CA3AF' }, // bg-gray-400
-            { name: 'Planning', count: counts.Planning, color: '#A855F7' }, // bg-purple-500
-            { name: 'In Progress', count: counts.InProgress, color: '#3B82F6' }, // bg-blue-500
-            { name: 'In Review', count: counts.InReview, color: '#EAB308' }, // bg-yellow-500
-            { name: 'On Hold', count: counts.OnHold, color: '#EF4444' }, // bg-red-500
-            { name: 'Completed', count: counts.Completed, color: '#10B981' } // bg-emerald-500
-        ];
-    }, [tasks]);
+    const regionData = useMemo(
+        () => regions.slice(0, 8).map(region => ({
+            name: region.name, flag: region.flag, ...stagesFor(snapshot.byRegion, region.id),
+        })),
+        [regions, snapshot.byRegion]
+    );
 
-    const brandData = clients.slice(0, 8).map(client => {
-        const clientTasks = tasks.filter(t => t.clientId === client.id);
-        return { name: client.name, favicon: client.favicon, ...getTaskCounts(clientTasks) };
-    });
+    const tagsData = useMemo(
+        () => allTags.slice(0, 8).map(tag => ({
+            name: tag.name, color: tag.color, ...stagesFor(snapshot.byTag, tag.id),
+        })),
+        [allTags, snapshot.byTag]
+    );
 
-    const regionData = regions.slice(0, 8).map(region => {
-        const regionTasks = tasks.filter(t => t.regionId === region.id);
-        return { name: region.name, flag: region.flag, ...getTaskCounts(regionTasks) };
-    });
+    const teamsData = useMemo(
+        () => teams.slice(0, 8).map(team => ({
+            name: team.name, color: team.color, ...stagesFor(snapshot.byTeam, team.id),
+        })),
+        [teams, snapshot.byTeam]
+    );
 
-    const tagsData = allTags.slice(0, 8).map(tag => {
-        const tagTasks = tasks.filter(t => t.tags?.some(tt => tt.id === tag.id));
-        return { name: tag.name, color: tag.color, ...getTaskCounts(tagTasks) };
-    });
-
-    const teamsData = teams.slice(0, 8).map(team => {
-        const teamTasks = tasks.filter(t => t.teamIds?.includes(team.id));
-        return { name: team.name, color: team.color, ...getTaskCounts(teamTasks) };
-    });
+    const asOfLabel = snapshot.asOf
+        ? new Date(`${snapshot.asOf}T00:00:00`).toLocaleDateString('en-GB', {
+            weekday: 'short', day: 'numeric', month: 'long', year: 'numeric',
+        })
+        : null;
 
     return (
         <div className="space-y-6">
@@ -250,19 +231,29 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
                 <div>
                     <h1 className="text-2xl font-semibold text-gray-900">Organization Dashboard</h1>
                     <p className="text-sm text-gray-600 mt-1">Overview of all teams, tasks, and capacity</p>
+                    {/* Said plainly, because these are yesterday's numbers and somebody acting
+                        on them needs to know that without having to be told twice. */}
+                    {asOfLabel && (
+                        <p className="text-xs text-gray-400 mt-1.5">
+                            Data as of {asOfLabel} · taken nightly
+                        </p>
+                    )}
                 </div>
                 <div className="flex items-center gap-4">
-                    <select
-                        value={timeRange}
-                        onChange={(e) => setTimeRange(e.target.value as any)}
-                        className="pl-3 pr-8 py-2 border border-gray-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all cursor-pointer"
-                    >
-                        <option value="week">Past Week</option>
-                        <option value="month">Past Month</option>
-                        <option value="quarter">Past Quarter</option>
-                        <option value="year">Past Year</option>
-                        <option value="lifetime">Lifetime</option>
-                    </select>
+                    {/* The range no longer filters a task list by creation date — there is no
+                        task list here any more. It picks how many nightly snapshots to read,
+                        so the cards show the latest day and the trend shows the window. */}
+                    {!isPublic && (
+                        <select
+                            value={timeRange}
+                            onChange={(e) => setTimeRange(e.target.value as TimeRange)}
+                            className="pl-3 pr-8 py-2 border border-gray-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all cursor-pointer"
+                        >
+                            {Object.entries(RANGE_LABELS).map(([value, label]) => (
+                                <option key={value} value={value}>{label}</option>
+                            ))}
+                        </select>
+                    )}
                     {!isPublic && (
                         <button
                             onClick={shareDashboard}
@@ -275,8 +266,27 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
                 </div>
             </div>
 
+            {/* Live, admin-only, and absent entirely when there is nothing wrong. Above the
+                snapshot cards because it is the only thing on this page that is happening now. */}
+            {!isPublic && currentUser && <AdminEmergentNeeds currentUser={currentUser} />}
+
+            {loadError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                    {loadError}
+                </div>
+            )}
+
+            {/* The nightly job has not produced a complete day yet — which is the normal state
+                for the first day after this ships. Zeros would read as "there is no work". */}
+            {!loading && !loadError && pending && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    No daily snapshot has been taken yet. The first one runs tonight at 23:59;
+                    until then these figures will read as zero.
+                </div>
+            )}
+
             {/* Key Metrics */}
-            <div className="grid grid-cols-4 gap-4">
+            <div className={`grid grid-cols-4 gap-4 ${loading ? 'opacity-50' : ''}`}>
                 <div className="bg-white rounded-lg border border-gray-200 p-5">
                     <div className="flex items-center justify-between">
                         <div>
@@ -348,8 +358,8 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
 
             <div className="grid grid-cols-2 gap-6">
                 {/* Team Capacity Overview */}
-                <div className={`bg-white rounded-lg border border-gray-200 p-6 ${isPublic ? 'col-span-2' : ''}`}>
-                    <div className="flex items-center justify-between mb-4">
+                <div className={`bg-white rounded-lg border border-gray-200 p-6 flex flex-col h-[400px] ${isPublic ? 'col-span-2' : ''}`}>
+                    <div className="flex items-center justify-between mb-4 flex-shrink-0">
                         <h2 className="text-lg font-semibold text-gray-900">Team Capacity Overview</h2>
                         {rotateTeams && (
                             <span className="text-xs text-gray-400">
@@ -357,7 +367,7 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
                             </span>
                         )}
                     </div>
-                    <div className={isPublic ? 'grid grid-cols-2 gap-x-10 gap-y-4' : 'space-y-4'}>
+                    <div className={`flex-1 overflow-hidden ${isPublic ? 'grid grid-cols-2 gap-x-10 gap-y-4' : 'space-y-4'}`}>
                         {displayedTeamWorkload.map(({ team, taskCount, memberCount, utilization }, index) => (
                             <div key={rotateTeams ? `slot-${index}` : team.id}>
                                 <div
@@ -393,57 +403,17 @@ export default function OrganizationDashboard({ currentUser, isPublic }: Props) 
                     </div>
                 </div>
 
-                {/* Tasks Requiring Attention (Hidden on Public Dashboard) */}
-                {!isPublic && (
-                    <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-                        <div className="flex items-center justify-between mb-6">
-                            <div className="flex items-center gap-2">
-                                <AlertCircle className="w-5 h-5 text-red-500" />
-                                <h2 className="text-lg font-semibold text-gray-900">Requires Attention</h2>
-                            </div>
-                        </div>
-                        <div className="space-y-3">
-                            {tasksRequiringAttention.length === 0 ? (
-                                <p className="text-sm text-gray-500 text-center py-4">No tasks currently require immediate attention.</p>
-                            ) : (
-                                tasksRequiringAttention.map(task => {
-                                    const client = clients.find(c => c.id === task.clientId);
-                                    const isOverdue = new Date(task.dueDate) < new Date('2026-07-28');
-                                    
-                                    return (
-                                        <div key={task.id} className="border border-gray-200 rounded-lg p-3">
-                                            <div className="flex items-start justify-between">
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex items-center gap-2">
-                                                        <div
-                                                            className="w-1 h-1 rounded-full"
-                                                            style={{ backgroundColor: getPriorityColor(task.priority) }}
-                                                        ></div>
-                                                        <h3 className="text-sm font-medium text-gray-900 truncate">{task.title}</h3>
-                                                    </div>
-                                                    <div className="flex items-center gap-2 mt-1">
-                                                        <span className="text-xs text-gray-500">{client?.name}</span>
-                                                        <span className="text-xs text-gray-400">•</span>
-                                                        <span className={`text-xs px-2 py-0.5 rounded ${getStatusBadgeColor(task.status)}`}>
-                                                            {formatStatusLabel(task.status)}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <div className="text-xs text-gray-500 ml-2">
-                                                    {isOverdue ? (
-                                                        <span className="text-red-600 font-medium">Overdue</span>
-                                                    ) : (
-                                                        new Date(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })
-                            )}
-                        </div>
+                {/* Combined Task Approval and Review Widget */}
+                {!isPublic && currentUser && (
+                    <div className="h-full">
+                        <TaskActionWidget currentUser={currentUser} />
                     </div>
                 )}
+            </div>
+
+            {/* How the numbers moved over the selected range. */}
+            <div className="mt-6">
+                <TrendChart series={series} title={`Trend · ${RANGE_LABELS[timeRange]}`} />
             </div>
 
             {/* Status Comparison Chart */}

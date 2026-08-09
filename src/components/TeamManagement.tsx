@@ -1,16 +1,27 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { User, AccessRequest } from '../types/types';
-import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Link as LinkIcon, Edit2, Trash2, Shield, Copy, Loader2, Mail, Building2, Globe } from 'lucide-react';
+import { Users as UsersIcon, UserPlus, Settings, Award, X, HelpCircle, Lock, Edit2, Trash2, Shield, Copy, Loader2, Mail, Building2, Globe } from 'lucide-react';
 import { useData } from '../contexts/DataContext';
 import { supabase } from '../lib/supabaseClient';
-import { inviteUser, type InviteResult } from '../lib/adminInvite';
+import { inviteUser, generateSetupPassword, type InviteResult } from '../lib/adminInvite';
 import toast from 'react-hot-toast';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { embedText } from '../utils/embeddings';
+import { useVirtualWindow } from '../lib/useVirtualWindow';
+import { PageSkeleton } from './Skeleton';
+import { useModalFocusTrap } from '../lib/useModalFocusTrap';
 interface Props {
     currentUser: User;
 }
+
+interface GeneratedCredential {
+    email: string;
+    temporaryPassword: string;
+    expiresAt: string;
+}
+
+export default React.memo(TeamManagement);
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[a-zA-Z]{2,}$/;
 
@@ -32,56 +43,6 @@ const splitEntries = (raw: string): string[] =>
         .map(p => p.trim())
         .filter(Boolean);
 
-// Icon-only, with the label in a tooltip: the invite dialog is narrow and the link is the
-// secondary action there, so it should not compete with Send for width.
-//
-// One link, the same for everybody, and safe to post anywhere: it goes to account setup, and
-// setup starts by mailing a one-time code to the address typed into it. An address nobody has
-// approved gets no code, so holding the link grants nothing on its own -- which is why this can
-// be a plain URL rather than a per-person secret that has to be kept and re-issued.
-//
-// It used to copy window.location.origin, with no path at all, which is where the bare
-// https://pm-tool-taupe.vercel.app people were being sent came from.
-const INVITE_PATH = '/welcome';
-
-const CopyInviteLinkButton = () => {
-    const [hovered, setHovered] = useState(false);
-    const [copied, setCopied] = useState(false);
-
-    const copy = async () => {
-        const link = `${window.location.origin}${INVITE_PATH}`;
-        try {
-            await navigator.clipboard.writeText(link);
-            toast.success('Setup link copied. Anyone you have approved can use it.');
-        } catch {
-            window.prompt('Copy the setup link:', link);
-            return;
-        }
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-    };
-
-    return (
-        <div className="relative flex items-center">
-            {(hovered || copied) && (
-                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 bg-gray-800 text-white text-xs font-medium rounded-md whitespace-nowrap pointer-events-none">
-                    {copied ? 'Link copied' : 'Copy link'}
-                </div>
-            )}
-            <button
-                type="button"
-                onClick={copy}
-                onMouseEnter={() => setHovered(true)}
-                onMouseLeave={() => setHovered(false)}
-                aria-label="Copy invite link"
-                className="w-10 h-10 rounded-full flex items-center justify-center text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors"
-            >
-                <LinkIcon className="w-5 h-5" />
-            </button>
-        </div>
-    );
-};
-
 let tempInviteeCount = 0;
 const makeTempInvitee = (email: string) => ({
     id: `temp-${Date.now()}-${tempInviteeCount++}`,
@@ -91,11 +52,28 @@ const makeTempInvitee = (email: string) => ({
     avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${email}&backgroundColor=3b82f6`,
 } as unknown as User);
 
-export default function TeamManagement({ currentUser }: Props) {
-    const { users, teams, skills, clients, regions, tasks, comments, refreshTeams, refreshSkills, refreshUsers } = useData();
+function TeamManagement({ currentUser }: Props) {
+    const { users, teams, skills, clients, regions, tasks, loading, refreshTeams, refreshSkills, refreshUsers } = useData();
+    const [commentAuthorIds, setCommentAuthorIds] = useState<Set<string>>(new Set());
     const { confirm } = useConfirm();
     const location = useLocation();
     const navigate = useNavigate();
+
+    useEffect(() => {
+        if (currentUser.role !== 'super_admin') return;
+        let cancelled = false;
+        supabase.from('comments').select('user_id').then(({ data, error }) => {
+            if (cancelled) return;
+            if (error) {
+                toast.error('Could not verify account history. Account deletion is disabled for safety.');
+                // A sentinel makes every account look historical and therefore non-deletable.
+                setCommentAuthorIds(new Set(users.map(user => user.id)));
+                return;
+            }
+            setCommentAuthorIds(new Set((data || []).map(row => row.user_id).filter(Boolean) as string[]));
+        });
+        return () => { cancelled = true; };
+    }, [currentUser.role, users]);
 
     // The viewer's own team always sorts first; everything else is alphabetical.
     const sortedTeams = useMemo(() => {
@@ -120,6 +98,10 @@ export default function TeamManagement({ currentUser }: Props) {
     // Invites nobody has claimed yet. Separate search and separate list from the teamless
     // members below: the two look alike and mean opposite things.
     const [pendingSearch, setPendingSearch] = useState('');
+    const [generatedCredentials, setGeneratedCredentials] = useState<GeneratedCredential[]>([]);
+    const credentialsDialogRef = useRef<HTMLDivElement>(null);
+    const closeGeneratedCredentials = useCallback(() => setGeneratedCredentials([]), []);
+    useModalFocusTrap(generatedCredentials.length > 0, closeGeneratedCredentials, credentialsDialogRef);
 
     // Pending "let me in" requests from the login screen. Admins only -- RLS says the same,
     // so a non-admin asking for them gets an empty list rather than a hidden one.
@@ -153,6 +135,7 @@ export default function TeamManagement({ currentUser }: Props) {
     // while the box has focus so an empty query still browses everyone available.
     const [addMemberSearch, setAddMemberSearch] = useState('');
     const [addMemberFocused, setAddMemberFocused] = useState(false);
+    const teamWindow = useVirtualWindow(sortedTeams.length, 900, 720, 1);
 
     useEffect(() => {
         if (!selectedTeam && sortedTeams.length > 0) {
@@ -178,19 +161,16 @@ export default function TeamManagement({ currentUser }: Props) {
         navigate(location.pathname, { replace: true, state: null });
     }, [location, sortedTeams, currentUser.id, navigate]);
 
-    const team = selectedTeam !== 'all' ? teams.find(t => t.id === selectedTeam) : undefined;
-    const actionTeam = teams.find(t => t.id === actionTeamId);
-    const getSkillName = (skillId: string) => {
-        return skills.find(s => s.id === skillId)?.name || skillId;
-    };
+    const skillNames = useMemo(() => new Map(skills.map(s => [s.id, s.name])), [skills]);
+    const clientNames = useMemo(() => new Map(clients.map(c => [c.id, c.name])), [clients]);
+    const regionLabels = useMemo(() => new Map(regions.map(r => [r.id, r.flag ? `${r.flag} ${r.name}` : r.name])), [regions]);
+    const team = useMemo(() => selectedTeam !== 'all' ? teams.find(t => t.id === selectedTeam) : undefined, [teams, selectedTeam]);
+    const actionTeam = useMemo(() => teams.find(t => t.id === actionTeamId), [teams, actionTeamId]);
+    const getSkillName = useCallback((skillId: string) => skillNames.get(skillId) || skillId, [skillNames]);
     // The brands and regions a member wants work from. Shown beside their skills because the
     // three together are what decides whether the round robin can hand them anything.
-    const getClientName = (clientId: string) => clients.find(c => c.id === clientId)?.name || clientId;
-    const getRegionLabel = (regionId: string) => {
-        const region = regions.find(r => r.id === regionId);
-        if (!region) return regionId;
-        return region.flag ? `${region.flag} ${region.name}` : region.name;
-    };
+    const getClientName = useCallback((clientId: string) => clientNames.get(clientId) || clientId, [clientNames]);
+    const getRegionLabel = useCallback((regionId: string) => regionLabels.get(regionId) || regionId, [regionLabels]);
 
     // Everyone can view every team's members/skills. Admins and the super admin can
     // manage any team; a team leader can only edit/invite for the team they're on.
@@ -347,14 +327,16 @@ export default function TeamManagement({ currentUser }: Props) {
                 return;
             }
 
-            // There is no per-person link to hand back any more, so whether the mail went out
-            // is the only thing that varies. Either way they are an invitee now, and the setup
-            // link -- the same one for everybody -- is what they use.
-            toast.success(
-                result.sent
-                    ? `${request.email} approved. Setup instructions are on their way.`
-                    : `${request.email} approved. Mail could not be sent — send them the setup link.`
-            );
+            if (!result.temporaryPassword || !result.expiresAt) {
+                toast.error('The account was created without a temporary password. Generate a new one from Pending Setup.');
+            } else {
+                setGeneratedCredentials([{
+                    email: request.email,
+                    temporaryPassword: result.temporaryPassword,
+                    expiresAt: result.expiresAt,
+                }]);
+                toast.success(`${request.email} approved. Copy their temporary password now.`);
+            }
 
             await resolveRequest(request.id, 'invited');
             if (refreshUsers) await refreshUsers();
@@ -393,20 +375,19 @@ export default function TeamManagement({ currentUser }: Props) {
             .sort((a, b) => a.name.localeCompare(b.name));
     }, [users, canSeeUnassigned, pendingSearch]);
 
-    /**
-     * There is nothing to re-issue. The setup link never expires and is the same for everybody,
-     * so somebody stuck part-way through does not need a new one -- they need this one, and a
-     * fresh code, which the page itself will send them. This used to mint a single-use magic
-     * link per person, which is exactly the thing that kept dying between the mail going out and
-     * the person clicking it.
-     */
-    const copySetupLink = async (user: User) => {
-        const link = `${window.location.origin}${INVITE_PATH}`;
+    const createSetupPassword = async (user: User) => {
         try {
-            await navigator.clipboard.writeText(link);
-            toast.success(`Setup link copied — send it to ${user.email}. It does not expire.`);
-        } catch {
-            window.prompt(`Send this to ${user.email}:`, link);
+            const result = await generateSetupPassword(user.email);
+            if (!result.temporaryPassword || !result.expiresAt) {
+                throw new Error('No temporary password was returned.');
+            }
+            setGeneratedCredentials([{
+                email: user.email,
+                temporaryPassword: result.temporaryPassword,
+                expiresAt: result.expiresAt,
+            }]);
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : 'Could not generate a temporary password.');
         }
     };
 
@@ -429,7 +410,7 @@ export default function TeamManagement({ currentUser }: Props) {
     // instead -- the button is not offered, so the rule is visible before it is enforced.
     const hasHistory = (userId: string) =>
         tasks.some((t: any) => t.assignedToId === userId || t.requesterId === userId || t.assignedById === userId)
-        || comments.some((c: any) => c.userId === userId);
+        || commentAuthorIds.has(userId);
 
     const canDeleteAccount = (user: User) =>
         currentUser.role === 'super_admin'
@@ -641,9 +622,7 @@ export default function TeamManagement({ currentUser }: Props) {
         if (leftover) return;
         if (inviteesToProcess.length === 0) return;
 
-        // Nobody gets a link of their own any more, so all that is tracked is who could not be
-        // mailed -- they need the shared setup link passed on by hand instead.
-        const couldNotMail: string[] = [];
+        const credentials: GeneratedCredential[] = [];
         const invitedEmails: string[] = [];
 
         for (const user of inviteesToProcess) {
@@ -656,10 +635,19 @@ export default function TeamManagement({ currentUser }: Props) {
             const needsResend = !isNewInvite && existingUser?.onboardingCompleted === false;
 
             if (needsResend) {
-                // Already an invitee, and the setup link they were given still works -- it is the
-                // same permanent link as everybody else's. Nothing to re-issue; they just have to
-                // go there and ask the page for a fresh code.
-                couldNotMail.push(user.email);
+                try {
+                    const result = await generateSetupPassword(user.email);
+                    if (result.temporaryPassword && result.expiresAt) {
+                        credentials.push({
+                            email: user.email,
+                            temporaryPassword: result.temporaryPassword,
+                            expiresAt: result.expiresAt,
+                        });
+                    }
+                } catch (err) {
+                    toast.error(`Failed to generate a temporary password for ${user.email}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+                    continue;
+                }
                 successfulInvites++;
                 invitedEmails.push(user.email);
                 continue;
@@ -677,9 +665,13 @@ export default function TeamManagement({ currentUser }: Props) {
                         teamId: actionTeam.id,
                     });
 
-                    // Supabase can only send once custom SMTP is configured; when it cannot,
-                    // the admin passes the shared setup link on by hand.
-                    if (!result.sent) couldNotMail.push(user.email);
+                    if (result.temporaryPassword && result.expiresAt) {
+                        credentials.push({
+                            email: user.email,
+                            temporaryPassword: result.temporaryPassword,
+                            expiresAt: result.expiresAt,
+                        });
+                    }
                 } catch (err) {
                     toast.error(`Failed to invite ${user.email}: ${err instanceof Error ? err.message : 'Unknown error'}`);
                     continue;
@@ -732,19 +724,8 @@ export default function TeamManagement({ currentUser }: Props) {
 
         if (successfulInvites > 0) {
             const who = successfulInvites === 1 ? invitedEmails[0] : `${successfulInvites} people`;
-            let alertMsg = `Invite sent to ${who} for ${actionTeam.name}.`;
-            if (couldNotMail.length > 0) {
-                // One link covers all of them, so it goes on the clipboard once.
-                const link = `${window.location.origin}${INVITE_PATH}`;
-                const who = couldNotMail.length === 1 ? couldNotMail[0] : `${couldNotMail.length} of them`;
-                try {
-                    await navigator.clipboard.writeText(link);
-                    alertMsg += `\n\nNo mail went to ${who} — the setup link is on your clipboard. Send it on; it does not expire.`;
-                } catch {
-                    alertMsg += `\n\nNo mail went to ${who} — send them ${link}`;
-                }
-            }
-            toast.success(alertMsg, { duration: 6000 });
+            toast.success(`Created ${who} for ${actionTeam.name}. Copy the temporary ${credentials.length === 1 ? 'password' : 'passwords'} now.`, { duration: 6000 });
+            if (credentials.length > 0) setGeneratedCredentials(credentials);
         }
 
         await refreshTeamsAndPeople();
@@ -1210,6 +1191,8 @@ export default function TeamManagement({ currentUser }: Props) {
         );
     };
 
+    if (loading) return <PageSkeleton variant="team" />;
+
     return (
         <div className="space-y-6">
             {/* Header */}
@@ -1258,9 +1241,18 @@ export default function TeamManagement({ currentUser }: Props) {
                 </div>
             </div>
 
-            {selectedTeam === 'all'
-                ? sortedTeams.map(t => <React.Fragment key={t.id}>{renderTeamSection(t)}</React.Fragment>)
-                : team && renderTeamSection(team)}
+            {selectedTeam === 'all' ? (
+                <div
+                    className={sortedTeams.length > 4 ? 'overflow-y-auto space-y-6' : 'space-y-6'}
+                    style={sortedTeams.length > 4 ? { maxHeight: teamWindow.viewportHeight } : undefined}
+                    onScroll={sortedTeams.length > 4 ? teamWindow.onScroll : undefined}
+                >
+                    {sortedTeams.length > 4 && <div style={{ height: teamWindow.paddingTop }} aria-hidden="true" />}
+                    {(sortedTeams.length > 4 ? sortedTeams.slice(teamWindow.start, teamWindow.end) : sortedTeams)
+                        .map(t => <React.Fragment key={t.id}>{renderTeamSection(t)}</React.Fragment>)}
+                    {sortedTeams.length > 4 && <div style={{ height: teamWindow.paddingBottom }} aria-hidden="true" />}
+                </div>
+            ) : team && renderTeamSection(team)}
 
             {/* People asking to be let in, from the login screen. Access requests are new
                 faces; reactivation requests are accounts that were switched off. */}
@@ -1273,10 +1265,10 @@ export default function TeamManagement({ currentUser }: Props) {
                         </h2>
                     </div>
                     <p className="text-sm text-gray-600 mb-4">
-                        Approving somebody turns them from a requester into an invitee: it creates their
-                        account, mails them the setup link, and lets them use the shared one. Setup asks for a
-                        code sent to their address, then a name and a password &mdash; finishing it makes them a
-                        member on the default team. Until then their role cannot be changed.
+                        Approving somebody creates their account and generates a temporary password that is
+                        shown to you once. It expires after three days. Send it through an approved channel;
+                        they use it on the Welcome page to choose their permanent password. Until setup is
+                        complete, their role cannot be changed.
                     </p>
 
                     <div className="space-y-3">
@@ -1359,9 +1351,9 @@ export default function TeamManagement({ currentUser }: Props) {
                 </div>
             )}
 
-            {/* Requesters -- invited, but nobody has claimed the invite yet. Admins only, and
+            {/* Requesters -- invited, but nobody has claimed the account yet. Admins only, and
                 deliberately its own section: they are not members, they hold no real role, and
-                the only useful thing to do with them is get the setup link back in front of
+                the only useful thing to do with them is issue a temporary password
                 them. Hidden entirely when there are none, since an empty list here is the
                 normal state of a healthy org. */}
             {canSeeUnassigned && pendingSetupUsers.length > 0 && (
@@ -1382,9 +1374,8 @@ export default function TeamManagement({ currentUser }: Props) {
                     <p className="text-sm text-gray-600 mb-4">
                         Approved, but they have not set up an account yet. They stay invitees until they do
                         &mdash; their role cannot be changed, by anyone &mdash; and they join the default team the
-                        moment they finish. There is nothing to re-issue: the setup link is the same for everybody
-                        and never expires, and the page mails them a fresh code whenever they ask. Only admins see
-                        this list.
+                        moment they finish. Generate a replacement temporary password if the previous one expired
+                        or was lost; doing so invalidates the previous credential immediately. Only admins see this list.
                     </p>
 
                     {pendingSetupUsers.length === 0 ? (
@@ -1419,11 +1410,11 @@ export default function TeamManagement({ currentUser }: Props) {
 
                                             <div className="flex items-center gap-2 shrink-0">
                                                 <button
-                                                    onClick={() => copySetupLink(u)}
+                                                    onClick={() => createSetupPassword(u)}
                                                     className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
                                                 >
                                                     <Copy className="w-4 h-4" />
-                                                    Copy setup link
+                                                    Generate temporary password
                                                 </button>
                                                 {canDeleteAccount(u) && (
                                                     <button
@@ -1677,7 +1668,6 @@ export default function TeamManagement({ currentUser }: Props) {
                         {selectedInvitees.length > 0 ? (
                             <div className="flex flex-col mt-6">
                                 <div className="flex justify-between items-center gap-3">
-                                    <CopyInviteLinkButton />
                                     <div className="flex items-center gap-3">
                                         <button
                                             onClick={() => {
@@ -1700,7 +1690,6 @@ export default function TeamManagement({ currentUser }: Props) {
                         ) : (
                             <div className="mt-6">
                                 <div className="flex justify-between items-center">
-                                    <CopyInviteLinkButton />
                                     <button
                                         onClick={() => setShowInviteMember(false)}
                                         className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
@@ -2104,6 +2093,67 @@ export default function TeamManagement({ currentUser }: Props) {
                                 className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200"
                             >
                                 Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {generatedCredentials.length > 0 && (
+                <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="temporary-password-title">
+                    <div ref={credentialsDialogRef} tabIndex={-1} className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6">
+                        <div className="flex items-start justify-between gap-4 mb-4">
+                            <div>
+                                <h2 id="temporary-password-title" className="text-lg font-semibold text-gray-900">
+                                    Temporary {generatedCredentials.length === 1 ? 'password' : 'passwords'}
+                                </h2>
+                                <p className="text-sm text-gray-600 mt-1">
+                                    Copy these now. They expire after three days and cannot be viewed again.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeGeneratedCredentials}
+                                aria-label="Close temporary passwords"
+                                className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="space-y-3">
+                            {generatedCredentials.map(credential => (
+                                <div key={credential.email} className="border border-gray-200 rounded-lg p-4">
+                                    <div className="text-sm font-medium text-gray-900">{credential.email}</div>
+                                    <div className="flex items-center gap-2 mt-2">
+                                        <code className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm break-all select-all">
+                                            {credential.temporaryPassword}
+                                        </code>
+                                        <button
+                                            type="button"
+                                            onClick={async () => {
+                                                await navigator.clipboard.writeText(credential.temporaryPassword);
+                                                toast.success(`Temporary password copied for ${credential.email}.`);
+                                            }}
+                                            className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                                        >
+                                            <Copy className="w-4 h-4" /> Copy
+                                        </button>
+                                    </div>
+                                    <p className="text-xs text-gray-500 mt-2">
+                                        Expires {new Date(credential.expiresAt).toLocaleString()}.
+                                    </p>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex justify-end mt-6">
+                            <button
+                                type="button"
+                                onClick={closeGeneratedCredentials}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                            >
+                                I have saved {generatedCredentials.length === 1 ? 'it' : 'them'}
                             </button>
                         </div>
                     </div>

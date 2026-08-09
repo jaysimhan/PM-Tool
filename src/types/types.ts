@@ -155,6 +155,7 @@ export interface Task {
     proposedStartDate?: string;
     proposedEndDate?: string;
     parentTaskId?: string;
+    sortOrder?: number;
     dependencyIds: string[]; // Legacy, kept for compatibility
     blockedByIds?: string[];
     blocksIds?: string[];

@@ -69,9 +69,9 @@ export function SingleDatePicker({ date, onChange, onClose, align = 'left' }: Si
         >
             {/* Calendar Header */}
             <div className="flex items-center justify-between mb-4 px-1">
-                <button type="button" onClick={prevMonth} className="p-1 hover:bg-gray-100 rounded-full text-gray-600"><ChevronLeft className="w-5 h-5" /></button>
+                <button type="button" aria-label="Previous month" onClick={prevMonth} className="p-1 hover:bg-gray-100 rounded-full text-gray-600"><ChevronLeft className="w-5 h-5" /></button>
                 <div className="font-semibold text-gray-700">{format(currentMonth, 'MMMM yyyy')}</div>
-                <button type="button" onClick={nextMonth} className="p-1 hover:bg-gray-100 rounded-full text-gray-600"><ChevronRight className="w-5 h-5" /></button>
+                <button type="button" aria-label="Next month" onClick={nextMonth} className="p-1 hover:bg-gray-100 rounded-full text-gray-600"><ChevronRight className="w-5 h-5" /></button>
             </div>
 
             {/* Calendar Grid */}

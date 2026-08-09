@@ -17,6 +17,7 @@ import AcceptTaskModal from './AcceptTaskModal';
 
 interface Props {
     currentUser: User;
+    hideHeader?: boolean;
 }
 
 const formatDateTime = (value?: string) =>
@@ -31,7 +32,7 @@ const formatDay = (value?: string) =>
         ? new Date(value).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
         : '—';
 
-export default function TaskApproval({ currentUser }: Props) {
+export default function TaskApproval({ currentUser, hideHeader }: Props) {
     const { tasks, assignments, clients, workCategories, users, refreshTasks, refreshAssignments } = useData();
 
     const [accepting, setAccepting] = useState<{ task: Task; assignment: Assignment } | null>(null);
@@ -87,10 +88,12 @@ export default function TaskApproval({ currentUser }: Props) {
 
     return (
         <div className="space-y-6">
-            <div>
-                <h1 className="text-2xl font-semibold text-gray-900">Task Approvals</h1>
-                <p className="text-sm text-gray-600 mt-1">Review and accept tasks assigned to you</p>
-            </div>
+            {!hideHeader && (
+                <div>
+                    <h1 className="text-2xl font-semibold text-gray-900">Task Approvals</h1>
+                    <p className="text-sm text-gray-600 mt-1">Review and accept tasks assigned to you</p>
+                </div>
+            )}
 
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
                 <div className="flex items-center gap-2">

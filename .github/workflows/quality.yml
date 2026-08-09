@@ -1,0 +1,26 @@
+name: quality
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run perf:check
+      # High findings are the time-bounded transformer exception documented in
+      # docs/SECURITY_EXCEPTIONS.md; any critical advisory still blocks immediately.
+      - run: npm audit --omit=dev --audit-level=critical
+      - run: npx supabase start -x studio,imgproxy,mailpit,edge-runtime,logflare,vector,supavisor
+      - run: npx supabase db lint --local --level warning
+      - run: docker exec -i supabase_db_PM_Web psql -v ON_ERROR_STOP=1 -U postgres -d postgres < tests/security/task_mutation_rls.sql
+      - run: tests/security/direct_rest_permissions.sh
+      - run: tests/security/assignment_concurrency.sh

@@ -1,46 +1,77 @@
 import React, { useState, useMemo } from 'react';
 import { User } from '../types/types';
-import { tasks, teams, users, clients, workCategories } from '../data/mockData';
+import { useData } from '../contexts/DataContext';
 import { BarChart3, Download, Calendar, TrendingUp, Users as UsersIcon, CheckCircle } from 'lucide-react';
 import TeamDashboard from './TeamDashboard';
+import { isTaskOverdue } from '../utils/capacityCalculations';
+import { PageSkeleton } from './Skeleton';
+import { useVirtualWindow } from '../lib/useVirtualWindow';
 
 interface Props {
     currentUser: User;
 }
 
+const dateBounds = (range: string, now = new Date()): [Date | null, Date | null] => {
+    const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const endOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+    if (range === 'all-time') return [null, null];
+    if (range === 'this-week') {
+        const start = startOfDay(now);
+        start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+        const end = endOfDay(new Date(start));
+        end.setDate(end.getDate() + 6);
+        return [start, end];
+    }
+    if (range === 'last-month') {
+        return [new Date(now.getFullYear(), now.getMonth() - 1, 1), endOfDay(new Date(now.getFullYear(), now.getMonth(), 0))];
+    }
+    if (range === 'this-quarter') {
+        const quarterMonth = Math.floor(now.getMonth() / 3) * 3;
+        return [new Date(now.getFullYear(), quarterMonth, 1), endOfDay(new Date(now.getFullYear(), quarterMonth + 3, 0))];
+    }
+    return [new Date(now.getFullYear(), now.getMonth(), 1), endOfDay(new Date(now.getFullYear(), now.getMonth() + 1, 0))];
+};
+
 export default function Reports({ currentUser }: Props) {
+    const { tasks, teams, users, clients, workCategories, loading } = useData();
     const [dateRange, setDateRange] = useState('this-month');
     const [activeTab, setActiveTab] = useState<'reports' | 'team'>('reports');
 
     const hasTeam = useMemo(() => {
         return teams.some(t => t.memberIds.includes(currentUser.id));
-    }, [currentUser]);
+    }, [teams, currentUser.id]);
 
-    // Calculate statistics
-    const stats = {
-        totalTasks: tasks.length,
-        completed: tasks.filter(t => t.status === 'completed').length,
-        active: tasks.filter(t =>
+    const report = useMemo(() => {
+        const [start, end] = dateBounds(dateRange);
+        // Reports are cohort reports: a request belongs to the period in which it was created.
+        // Completed/on-time figures are then calculated for that same cohort, avoiding a mix
+        // of old requests and new completions when the selector changes.
+        const filteredTasks = tasks.filter(t => {
+            if (!start || !end) return true;
+            const created = new Date(t.createdDate);
+            return !Number.isNaN(created.getTime()) && created >= start && created <= end;
+        });
+        const stats = {
+        totalTasks: filteredTasks.length,
+        completed: filteredTasks.filter(t => t.status === 'completed').length,
+        active: filteredTasks.filter(t =>
             t.status === 'in_progress' ||
             t.status === 'scheduled' ||
             t.status === 'accepted'
         ).length,
-        onTime: tasks.filter(t =>
+        onTime: filteredTasks.filter(t =>
             t.status === 'completed' &&
             t.completedDate &&
             new Date(t.completedDate) <= new Date(t.dueDate)
         ).length,
-        overdue: tasks.filter(t => {
-            if (t.status === 'completed' || t.status === 'cancelled') return false;
-            return new Date(t.dueDate) < new Date('2026-07-28');
-        }).length
-    };
+        overdue: filteredTasks.filter(t => isTaskOverdue(t)).length
+        };
 
-    const completionRate = stats.completed > 0 ? (stats.onTime / stats.completed) * 100 : 0;
+        const completionRate = stats.completed > 0 ? (stats.onTime / stats.completed) * 100 : 0;
 
     // Work by category
     const categoryStats = workCategories.map(category => {
-        const categoryTasks = tasks.filter(t => t.categoryId === category.id);
+        const categoryTasks = filteredTasks.filter(t => t.categoryId === category.id);
         const completed = categoryTasks.filter(t => t.status === 'completed').length;
         const active = categoryTasks.filter(t =>
             t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'
@@ -57,7 +88,7 @@ export default function Reports({ currentUser }: Props) {
 
     // Work by client
     const clientStats = clients.map(client => {
-        const clientTasks = tasks.filter(t => t.clientId === client.id);
+        const clientTasks = filteredTasks.filter(t => t.clientId === client.id);
         const completed = clientTasks.filter(t => t.status === 'completed').length;
         const active = clientTasks.filter(t =>
             t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'
@@ -73,14 +104,16 @@ export default function Reports({ currentUser }: Props) {
 
     // Team performance
     const teamPerformance = teams.map(team => {
-        const teamTasks = tasks.filter(t => t.teamIds.includes(team.id));
+        const teamTasks = filteredTasks.filter(t => t.teamIds.includes(team.id));
         const completed = teamTasks.filter(t => t.status === 'completed').length;
         const active = teamTasks.filter(t =>
             t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'
         ).length;
         const teamMembers = users.filter(u => team.memberIds.includes(u.id));
         const totalCapacity = teamMembers.reduce((sum, u) => sum + u.dailyCapacity, 0) * 5;
-        const scheduledHours = active * 10; // Rough estimate
+        const scheduledHours = teamTasks
+            .filter(t => t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
+            .reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
 
         return {
             team: team.name,
@@ -97,7 +130,7 @@ export default function Reports({ currentUser }: Props) {
     const userProductivity = users
         .filter(u => u.role === 'team_member' || u.role === 'team_leader')
         .map(user => {
-            const userTasks = tasks.filter(t => t.assignedToId === user.id);
+            const userTasks = filteredTasks.filter(t => t.assignedToId === user.id);
             const completed = userTasks.filter(t => t.status === 'completed').length;
             const active = userTasks.filter(t =>
                 t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'
@@ -119,7 +152,17 @@ export default function Reports({ currentUser }: Props) {
         })
         .filter(u => u.total > 0)
         .sort((a, b) => b.completed - a.completed)
-        .slice(0, 10);
+        .slice(0, 100);
+
+        return { stats, completionRate, categoryStats, clientStats, teamPerformance, userProductivity };
+    }, [dateRange, tasks, teams, users, clients, workCategories]);
+
+    const teamRows = useVirtualWindow(report.teamPerformance.length, 49, 420, 5);
+    const memberRows = useVirtualWindow(report.userProductivity.length, 49, 420, 5);
+
+    if (loading) return <PageSkeleton variant="reports" />;
+
+    const { stats, completionRate, categoryStats, clientStats, teamPerformance, userProductivity } = report;
 
     return (
         <div className="space-y-6">
@@ -281,7 +324,7 @@ export default function Reports({ currentUser }: Props) {
             {/* Team Performance */}
             <div className="bg-white rounded-lg border border-gray-200 p-6">
                 <h2 className="text-lg font-semibold text-gray-900 mb-4">Team Performance</h2>
-                <div className="overflow-x-auto">
+                <div className="overflow-auto" style={{ maxHeight: teamRows.viewportHeight }} onScroll={teamRows.onScroll}>
                     <table className="w-full">
                         <thead className="bg-gray-50 border-b border-gray-200">
                             <tr>
@@ -294,7 +337,8 @@ export default function Reports({ currentUser }: Props) {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200">
-                            {teamPerformance.map((team, index) => (
+                            {teamRows.paddingTop > 0 && <tr aria-hidden="true"><td colSpan={6} style={{ height: teamRows.paddingTop, padding: 0 }} /></tr>}
+                            {teamPerformance.slice(teamRows.start, teamRows.end).map((team, index) => (
                                 <tr key={index} className="hover:bg-gray-50">
                                     <td className="px-4 py-3">
                                         <div className="flex items-center gap-2">
@@ -325,6 +369,7 @@ export default function Reports({ currentUser }: Props) {
                                     </td>
                                 </tr>
                             ))}
+                            {teamRows.paddingBottom > 0 && <tr aria-hidden="true"><td colSpan={6} style={{ height: teamRows.paddingBottom, padding: 0 }} /></tr>}
                         </tbody>
                     </table>
                 </div>
@@ -333,7 +378,7 @@ export default function Reports({ currentUser }: Props) {
             {/* Top Performers */}
             <div className="bg-white rounded-lg border border-gray-200 p-6">
                 <h2 className="text-lg font-semibold text-gray-900 mb-4">Team Member Activity</h2>
-                <div className="overflow-x-auto">
+                <div className="overflow-auto" style={{ maxHeight: memberRows.viewportHeight }} onScroll={memberRows.onScroll}>
                     <table className="w-full">
                         <thead className="bg-gray-50 border-b border-gray-200">
                             <tr>
@@ -346,7 +391,8 @@ export default function Reports({ currentUser }: Props) {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200">
-                            {userProductivity.map((user, index) => (
+                            {memberRows.paddingTop > 0 && <tr aria-hidden="true"><td colSpan={6} style={{ height: memberRows.paddingTop, padding: 0 }} /></tr>}
+                            {userProductivity.slice(memberRows.start, memberRows.end).map((user, index) => (
                                 <tr key={index} className="hover:bg-gray-50">
                                     <td className="px-4 py-3 text-sm font-medium text-gray-900">{user.user}</td>
                                     <td className="px-4 py-3 text-sm text-gray-600">{user.team}</td>
@@ -363,6 +409,7 @@ export default function Reports({ currentUser }: Props) {
                                     </td>
                                 </tr>
                             ))}
+                            {memberRows.paddingBottom > 0 && <tr aria-hidden="true"><td colSpan={6} style={{ height: memberRows.paddingBottom, padding: 0 }} /></tr>}
                         </tbody>
                     </table>
                 </div>

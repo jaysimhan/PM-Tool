@@ -1,5 +1,11 @@
 import { Task, User, Leave, CapacityData, WorkloadStatus } from '../types/types';
 
+const toUtcCalendarDay = (value: string): number => {
+    const match = value.slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return Number.NaN;
+    return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+};
+
 export function getWorkloadStatus(utilization: number): WorkloadStatus {
     if (utilization >= 100) return 'overallocated';
     if (utilization >= 80) return 'near_capacity';
@@ -25,26 +31,33 @@ export function calculateDailyCapacity(
     leaves: Leave[]
 ): CapacityData {
     // Parse date once for all comparisons
-    const dateTs = new Date(date).getTime();
+    const dateTs = toUtcCalendarDay(date);
+    if (!Number.isFinite(dateTs)) return {
+        date, totalCapacity: 0, scheduledHours: 0, provisionalHours: 0,
+        blockedHours: 0, leaveHours: 0, availableHours: 0, utilization: 0,
+        status: 'available', taskCount: 0
+    };
 
-    // Check if user is on leave
-    const onLeave = leaves.some(leave =>
+    const applicableLeaves = leaves.filter(leave =>
         leave.userId === user.id &&
-        new Date(leave.startDate).getTime() <= dateTs &&
-        new Date(leave.endDate).getTime() >= dateTs
+        toUtcCalendarDay(leave.startDate) <= dateTs &&
+        toUtcCalendarDay(leave.endDate) >= dateTs
     );
-
-    const totalCapacity = onLeave ? 0 : user.dailyCapacity;
+    const baseCapacity = user.isActive === false || user.deletedAt ? 0 : Math.max(0, user.dailyCapacity || 0);
+    const leaveHours = Math.min(baseCapacity, applicableLeaves.reduce(
+        (total, leave) => total + Math.max(0, leave.hours ?? baseCapacity), 0
+    ));
+    const totalCapacity = Math.max(0, baseCapacity - leaveHours);
 
     // Calculate scheduled hours for this date
     const userTasks = tasks.filter(task =>
         task.assignedToId === user.id &&
-        task.status !== 'completed' &&
-        task.status !== 'cancelled' &&
+        ['accepted', 'in_progress', 'scheduled', 'awaiting_employee_approval', 'provisional_assignment'].includes(task.status) &&
+        !(task.subtaskIds?.length) &&
         task.proposedStartDate &&
         task.proposedEndDate &&
-        new Date(task.proposedStartDate).getTime() <= dateTs &&
-        new Date(task.proposedEndDate).getTime() >= dateTs
+        toUtcCalendarDay(task.proposedStartDate) <= dateTs &&
+        toUtcCalendarDay(task.proposedEndDate) >= dateTs
     );
 
     let scheduledHours = 0;
@@ -61,7 +74,7 @@ export function calculateDailyCapacity(
     });
 
     const availableHours = Math.max(0, totalCapacity - scheduledHours);
-    const utilization = totalCapacity > 0 ? (scheduledHours / totalCapacity) * 100 : 0;
+    const utilization = totalCapacity > 0 ? (scheduledHours / totalCapacity) * 100 : scheduledHours > 0 ? 100 : 0;
     const status = getWorkloadStatus(utilization);
 
     return {
@@ -70,7 +83,7 @@ export function calculateDailyCapacity(
         scheduledHours,
         provisionalHours,
         blockedHours: 0,
-        leaveHours: onLeave ? user.dailyCapacity : 0,
+        leaveHours,
         availableHours,
         utilization,
         status,
@@ -81,10 +94,10 @@ export function calculateDailyCapacity(
 function calculateTaskHoursPerDay(task: Task): number {
     if (!task.proposedStartDate || !task.proposedEndDate) return 0;
 
-    const start = new Date(task.proposedStartDate);
-    const end = new Date(task.proposedEndDate);
-
-    const daysDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+    const start = toUtcCalendarDay(task.proposedStartDate);
+    const end = toUtcCalendarDay(task.proposedEndDate);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+    const daysDiff = Math.max(1, Math.round((end - start) / 86_400_000) + 1);
 
     // Distribute hours evenly across days
     return task.estimatedHours / daysDiff;
@@ -101,6 +114,48 @@ export function getDatesInRange(startDate: string, days: number): string[] {
     }
 
     return dates;
+}
+
+/**
+ * Midnight this morning.
+ *
+ * Four screens used to write `new Date('2026-07-28')` where they meant "today" -- a date
+ * frozen at some point during the build. Every overdue count, every "due soon" figure and the
+ * date printed on the personal dashboard was answering for that day rather than this one, and
+ * the numbers drifted further from the truth every day the app stayed up.
+ *
+ * Midnight rather than `new Date()` because these are comparisons against dates, not moments:
+ * a task due today is not overdue at nine in the morning, and it would be if this returned the
+ * current time.
+ */
+export function startOfToday(): Date {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    return date;
+}
+
+/**
+ * Behind its due date and nobody has finished it. Finished and cancelled work cannot be
+ * overdue -- it is not waiting on anyone -- and a task with no due date has nothing to be late
+ * against.
+ */
+export function isTaskOverdue(task: Pick<Task, 'dueDate' | 'status'>, asOf: Date = startOfToday()): boolean {
+    if (!task.dueDate) return false;
+    if (task.status === 'completed' || task.status === 'cancelled') return false;
+    return new Date(task.dueDate) < asOf;
+}
+
+/** Due between this morning and the end of the day `days` from now, and still open. */
+export function isTaskDueSoon(task: Pick<Task, 'dueDate' | 'status'>, days = 3, asOf: Date = startOfToday()): boolean {
+    if (!task.dueDate) return false;
+    if (task.status === 'completed' || task.status === 'cancelled') return false;
+
+    const horizon = new Date(asOf);
+    horizon.setDate(horizon.getDate() + days);
+    horizon.setHours(23, 59, 59, 999);
+
+    const due = new Date(task.dueDate);
+    return due >= asOf && due <= horizon;
 }
 
 export function formatDate(dateString: string): string {

@@ -10,7 +10,6 @@ import { Logo } from './Logo';
 import { SkillPicker } from './SkillPicker';
 import { PreferenceMultiSelect } from './PreferenceMultiSelect';
 import { AccessRequestModal } from './AccessRequestModal';
-import { checkOnboardingEmail, claimInviteeAccount, OnboardingEmailStatus } from '../lib/onboardingClaim';
 
 const PageLoader = () => (
     <div className="flex items-center justify-center h-screen bg-gray-50">
@@ -53,79 +52,15 @@ const isDeletedAccountError = (err: any) =>
     err?.code === 'user_not_found' || /sub claim|user not found/i.test(err?.message || '');
 
 /**
- * What GoTrue puts in the URL when a link does not work out. It arrives in the fragment
- * (#error=access_denied&error_code=otp_expired&...) and, unlike the success case, supabase-js
- * leaves it there rather than clearing it -- so it is still readable by the time this renders.
- *
- * Reading it is the whole point: without this the screen sees no session, concludes the visitor
- * is a stranger, and sends them to /login, which is how a dead invite link came to look like
- * being asked to sign in.
- */
-function readLinkError(): string | null {
-    if (typeof window === 'undefined') return null;
-    const fromHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-    const fromQuery = new URLSearchParams(window.location.search);
-    const code = fromHash.get('error_code') || fromQuery.get('error_code');
-    const description = fromHash.get('error_description') || fromQuery.get('error_description');
-    const error = fromHash.get('error') || fromQuery.get('error');
-    if (!code && !description && !error) return null;
-
-    if (code === 'otp_expired' || /expired/i.test(description || '')) {
-        return 'That link has expired or had already been used. Links are good for one visit only — no matter: enter your email below and carry on from there.';
-    }
-    return description
-        ? description.replace(/\+/g, ' ')
-        : 'That link did not work. Enter your email below and carry on from there.';
-}
-
-/**
  * Where step 1 sends an address that is not waiting to be set up, and what it says on the way.
  * Every one of these is somebody who should be on the sign-in page: either they have a password
  * already, or the thing they need is an admin rather than this screen.
  */
-const turnedAwayMessage: Record<Exclude<OnboardingEmailStatus, 'invitee'>, string> = {
-    member: 'You are already a member — sign in with your password.',
-    deactivated: 'That account has been deactivated. Ask an admin to turn it back on, or use "Request reactivation".',
-    deleted: 'That account has been deleted. Use "Request reactivation" and an admin can restore it.',
-    unknown: 'We have no account for that address yet. Ask an admin, or use "Request access".',
-};
-
 /**
- * Account setup, and the only door an invitee comes through.
- *
- * This screen used to assume it was being opened from a per-person invite link that had already
- * authenticated the visitor, so a visitor without a session could only be somebody lost, and it
- * sent them to /login. That assumption cost us both of the things that were wrong with invites:
- * a link that had expired or been clicked twice arrived here with no session and silently became
- * the login page, and the "shareable" link could not be shared because it was not really a link
- * to anywhere -- the credential was the whole of it.
- *
- * So the credential moved off the link. /welcome is now a public address that anyone may open,
- * and step 1 establishes who they are on the spot:
- *
- *   1a  email     -- the address they were approved under. onboarding_email_status() says which
- *                    of five states it is in, and only one of them belongs on this screen: an
- *                    invitee, meaning an account an admin created that has never been set up.
- *                    A member, a disabled account and an address with no account are all told
- *                    why in a toast and sent to /login, which is where what they need is.
- *   1b  account   -- name and password.
- *
- * Somebody who followed a working invite link from their mail arrives already signed in and
- * starts at 1b; 1a is what the shared link needs and what a dead link falls back to.
- *
- * The one-time code that used to sit between the two is parked (it is in the history if it comes
- * back). It proved the visitor reads mail at the address, and without it the address alone is
- * what gets somebody in -- which is also why the password on 1b cannot be set with
- * `auth.updateUser`: there is no session to set it under. The onboarding-claim Edge Function
- * does it, under the same invitee rule, and the browser then signs in with what it set. See that
- * function's header for what parking the code costs.
- *
- * Finishing 1b is what turns an invitee into a member: complete_onboarding_step_one() sets
- * onboarding_completed, promotes them out of 'invitee', puts them on the default team and closes
- * their access request, in one transaction.
- *
- * Step 2 -- team, skills, brands, regions -- is preferences, and preferences live in the app
- * already, so it is skippable and walking away from it costs nothing.
+ * Public account setup without magic links or email OTPs. Entering an email only advances the
+ * form and never queries the server. The three-day administrator-issued temporary password is
+ * the credential: the Edge Function verifies and consumes it before setting the permanent Auth
+ * password. Finishing step one then promotes the invitee and assigns their initial team.
  */
 export function Onboarding() {
     const { session, profile, loading: authLoading, refreshProfile, signOut } = useAuth();
@@ -139,9 +74,8 @@ export function Onboarding() {
     const [verifyEmail, setVerifyEmail] = useState('');
     const [checking, setChecking] = useState(false);
     const [showRequestAccess, setShowRequestAccess] = useState(false);
-    // Only ever read once, and before anything else can rewrite the URL.
-    const [linkError, setLinkError] = useState<string | null>(readLinkError);
     const [name, setName] = useState('');
+    const [temporaryPassword, setTemporaryPassword] = useState('');
     const [newPassword, setNewPassword] = useState('');
     const [retypePassword, setRetypePassword] = useState('');
     const [showNew, setShowNew] = useState(false);
@@ -193,11 +127,6 @@ export function Onboarding() {
     // whether the address still has to be established. Derived rather than stored: an effect
     // would leave one render showing the email form to somebody who is already signed in.
     const stage: 'email' | 'account' = session?.user ? 'account' : unverifiedStage;
-
-    // Whatever a dead link had to say stops mattering the moment they are in.
-    useEffect(() => {
-        if (session?.user) setLinkError(null);
-    }, [session]);
 
     // Read teams/skills straight from Supabase rather than DataContext: DataContext loads
     // once on mount, which on an invite link can be before the session exists.
@@ -291,23 +220,10 @@ export function Onboarding() {
 
         setChecking(true);
         setError(null);
-        setLinkError(null);
-        try {
-            const status = await checkOnboardingEmail(address);
-
-            if (status !== 'invitee') {
-                toast(turnedAwayMessage[status], { icon: 'ℹ️', duration: 7000 });
-                navigate('/login', { replace: true });
-                return;
-            }
-
-            setVerifyEmail(address);
-            setStage('account');
-        } catch (err: any) {
-            setError(err.message || 'Could not check that address.');
-        } finally {
-            setChecking(false);
-        }
+        // Deliberately no server lookup: advancing this form must not reveal whether an email
+        // exists. The temporary password is the credential and the next submission checks both.
+        setStage('account');
+        setChecking(false);
     };
 
     const handleCreatePassword = async (e: React.FormEvent) => {
@@ -341,24 +257,30 @@ export function Onboarding() {
                 // point of this step is that a password exists, and one does.
                 if (updateError && !isSamePasswordError(updateError)) throw updateError;
             } else {
-                // Nobody is signed in, because step 1a established the address by asking the
-                // database rather than by mailing it. `updateUser` has no session to work with,
-                // so the Edge Function sets the password (and confirms the address, which an
-                // invite leaves unconfirmed), and signing in with it is what produces the
-                // session the RPC below needs.
-                await claimInviteeAccount({
-                    email: verifyEmail,
-                    name: name.trim(),
-                    password: newPassword
-                });
+                if (!temporaryPassword) {
+                    throw new Error('Enter the temporary password provided by your administrator.');
+                }
 
-                const { data: signedIn, error: signInError } = await supabase.auth.signInWithPassword({
-                    email: verifyEmail,
-                    password: newPassword
+                const { data: claim, error: claimError } = await supabase.functions.invoke('onboarding-claim', {
+                    body: {
+                        email: verifyEmail.trim().toLowerCase(),
+                        temporaryPassword,
+                        newPassword,
+                        name: name.trim(),
+                    },
+                });
+                if (claimError || !claim?.ok) {
+                    throw new Error(
+                        'The email or temporary password is incorrect, expired, already used, or temporarily locked.'
+                    );
+                }
+
+                invitedTeamId = claim.teamId ?? null;
+                const { error: signInError } = await supabase.auth.signInWithPassword({
+                    email: verifyEmail.trim().toLowerCase(),
+                    password: newPassword,
                 });
                 if (signInError) throw signInError;
-
-                invitedTeamId = (signedIn.user?.user_metadata?.team_id as string | undefined) ?? null;
             }
 
             // Before the call, not after. On the claim path the sign-in above happens in this
@@ -401,7 +323,7 @@ export function Onboarding() {
                 setRetypePassword('');
                 setError(
                     'That setup link was issued for an account that no longer exists — it was'
-                    + ' probably replaced by a newer invite. Enter your email address to start'
+                    + ' probably replaced by a newer credential. Enter your email address to start'
                     + ' again.'
                 );
                 return;
@@ -527,14 +449,6 @@ export function Onboarding() {
                         ))}
                     </div>
 
-                    {/* A dead link is not the visitor's mistake and there is a way on from here,
-                        so it is said in amber and followed by the form that fixes it. */}
-                    {linkError && (
-                        <div className="mb-4 bg-amber-50 text-amber-800 px-4 py-3 rounded-lg text-sm border border-amber-200">
-                            {linkError}
-                        </div>
-                    )}
-
                     {error && (
                         <div className="mb-4 bg-red-50 text-red-700 px-4 py-3 rounded-lg text-sm border border-red-100">
                             {error}
@@ -556,9 +470,8 @@ export function Onboarding() {
                                     placeholder="you@example.com"
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
                                 />
-                                <div className="mt-2 bg-amber-50 text-amber-800 px-3 py-2.5 rounded-lg text-xs font-medium border border-amber-200">
-                                    This has to be the address an admin approved, character for character.
-                                    Only an address that is waiting to be set up gets past here.
+                                <div className="mt-2 bg-blue-50 text-blue-800 px-3 py-2.5 rounded-lg text-xs font-medium border border-blue-200">
+                                    Use the address your administrator approved. No account information is revealed at this step.
                                 </div>
                             </div>
 
@@ -585,6 +498,26 @@ export function Onboarding() {
                                 />
                                 <p className="text-xs text-gray-500">This is the address your invite was sent to.</p>
                             </div>
+
+                            {!session?.user && (
+                                <div className="space-y-1">
+                                    <label className="block text-sm font-medium text-gray-700">
+                                        Temporary Password <span className="text-gray-500">*</span>
+                                    </label>
+                                    <input
+                                        type="password"
+                                        required
+                                        name="temporary-password"
+                                        autoComplete="one-time-code"
+                                        value={temporaryPassword}
+                                        onChange={(e) => setTemporaryPassword(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
+                                    />
+                                    <p className="text-xs text-gray-500">
+                                        Provided by your administrator. It expires three days after generation and works once.
+                                    </p>
+                                </div>
+                            )}
 
                             <div className="space-y-1">
                                 <label className="block text-sm font-medium text-gray-700">

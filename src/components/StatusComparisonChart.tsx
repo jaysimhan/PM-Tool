@@ -11,7 +11,13 @@ interface Props {
   title: string;
 }
 
-export default function StatusComparisonChart({ data, title }: Props) {
+/**
+ * Memoised because the dashboard around it re-renders on a timer. The public dashboard swaps
+ * one team card every 4.5 seconds, and without this each of those ticks re-rendered every
+ * chart on the page as well. The data prop is built inside a useMemo upstream, so the
+ * identity is stable and this actually holds.
+ */
+function StatusComparisonChart({ data, title }: Props) {
   const { maxTotal, yTicks, chartHeight } = useMemo(() => {
     const maxVal = Math.max(...data.map(d => d.count), 10);
     const maxValue = Math.ceil(maxVal / 10) * 10;
@@ -108,3 +114,5 @@ export default function StatusComparisonChart({ data, title }: Props) {
     </div>
   );
 }
+
+export default React.memo(StatusComparisonChart);

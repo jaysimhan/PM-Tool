@@ -1,22 +1,50 @@
 import React, { useMemo } from 'react';
 import { User } from '../types/types';
-import { users, teams, tasks, clients } from '../data/mockData';
+import { useData } from '../contexts/DataContext';
 import { Users as UsersIcon, TrendingUp, Clock, CheckCircle } from 'lucide-react';
 import { getStatusBadgeColor, formatStatusLabel, getPriorityColor } from '../utils/capacityCalculations';
+import { PageSkeleton } from './Skeleton';
+import { useOpenTask } from '../lib/appNav';
 
 interface Props {
     currentUser: User;
 }
 
 export default function TeamDashboard({ currentUser }: Props) {
+    const openTask = useOpenTask();
+    const { users, teams, tasks, clients, loading } = useData();
     // Get user's team(s)
     const userTeams = useMemo(() => {
         return teams.filter(t => t.memberIds.includes(currentUser.id));
-    }, [currentUser]);
+    }, [teams, currentUser.id]);
 
     const selectedTeam = userTeams[0]; // For simplicity, show first team
 
-    if (!selectedTeam) {
+    const view = useMemo(() => {
+        if (!selectedTeam) return null;
+        const teamMembers = users.filter(u => selectedTeam.memberIds.includes(u.id));
+        const teamTasks = tasks.filter(t => t.teamIds.includes(selectedTeam.id));
+        const activeTasks = teamTasks.filter(t =>
+            t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'
+        );
+        const completedTasks = teamTasks.filter(t => t.status === 'completed');
+        const unassignedTasks = teamTasks.filter(t => !t.assignedToId);
+        const totalCapacity = teamMembers.reduce((sum, u) => sum + u.dailyCapacity, 0);
+        const scheduledHours = activeTasks.reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
+        const weeklyCapacity = totalCapacity * 5;
+        const utilization = weeklyCapacity > 0 ? (scheduledHours / weeklyCapacity) * 100 : 0;
+        const memberWorkload = teamMembers.map(member => {
+            const memberTasks = activeTasks.filter(t => t.assignedToId === member.id);
+            const hours = memberTasks.reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
+            const capacity = member.dailyCapacity * 5;
+            return { member, tasks: memberTasks, hours, capacity, utilization: capacity > 0 ? (hours / capacity) * 100 : 0 };
+        }).sort((a, b) => b.utilization - a.utilization);
+        return { teamMembers, teamTasks, activeTasks, completedTasks, unassignedTasks, scheduledHours, weeklyCapacity, utilization, memberWorkload };
+    }, [selectedTeam, users, tasks]);
+
+    if (loading) return <PageSkeleton variant="team" />;
+
+    if (!selectedTeam || !view) {
         return (
             <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
                 <div className="text-gray-500">You are not assigned to any team</div>
@@ -24,37 +52,7 @@ export default function TeamDashboard({ currentUser }: Props) {
         );
     }
 
-    // Get team members
-    const teamMembers = users.filter(u => selectedTeam.memberIds.includes(u.id));
-
-    // Get team tasks
-    const teamTasks = tasks.filter(t => t.teamIds.includes(selectedTeam.id));
-    const activeTasks = teamTasks.filter(t =>
-        t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'
-    );
-    const completedTasks = teamTasks.filter(t => t.status === 'completed');
-    const unassignedTasks = teamTasks.filter(t => !t.assignedToId);
-
-    // Calculate team capacity
-    const totalCapacity = teamMembers.reduce((sum, u) => sum + u.dailyCapacity, 0);
-    const scheduledHours = activeTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
-    const weeklyCapacity = totalCapacity * 5;
-    const utilization = (scheduledHours / weeklyCapacity) * 100;
-
-    // Member workload
-    const memberWorkload = teamMembers.map(member => {
-        const memberTasks = activeTasks.filter(t => t.assignedToId === member.id);
-        const hours = memberTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
-        const capacity = member.dailyCapacity * 5;
-
-        return {
-            member,
-            tasks: memberTasks,
-            hours,
-            capacity,
-            utilization: (hours / capacity) * 100
-        };
-    }).sort((a, b) => b.utilization - a.utilization);
+    const { teamMembers, activeTasks, completedTasks, unassignedTasks, scheduledHours, weeklyCapacity, utilization, memberWorkload } = view;
 
     return (
         <div className="space-y-6">
@@ -247,7 +245,10 @@ export default function TeamDashboard({ currentUser }: Props) {
                                         {task.estimatedHours}h • Due {new Date(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                                     </div>
                                 </div>
-                                <button className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700">
+                                <button
+                                    onClick={() => openTask(task.id)}
+                                    className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
+                                >
                                     Assign
                                 </button>
                             </div>

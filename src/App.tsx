@@ -1,15 +1,12 @@
 import React, { Suspense, lazy } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { Login } from './components/Login';
-import { SecuritySettings } from './components/SecuritySettings';
-import { Onboarding } from './components/Onboarding';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ProtectedRoute } from './components/ProtectedRoute';
-import { DashboardLayout } from './layouts/DashboardLayout';
 import { useAuth } from './contexts/AuthContext';
 import { MemberViewProvider } from './contexts/MemberViewContext';
-import { TestDataProvider } from './contexts/TestDataProvider';
 import { canUseTestEnvironment, useIsTestPath, TEST_PREFIX } from './lib/testEnvironment';
 import { User } from './types/types';
+import { AppSkeleton } from './components/Skeleton';
 
 // Lazy-load page components for code-splitting
 const OrganizationDashboard = lazy(() => import('./components/OrganizationDashboard'));
@@ -18,20 +15,20 @@ const CalendarView = lazy(() => import('./components/CalendarView'));
 const PersonalDashboard = lazy(() => import('./components/PersonalDashboard'));
 const TaskApproval = lazy(() => import('./components/TaskApproval'));
 const ManagerReview = lazy(() => import('./components/ManagerReview'));
-const TeamDashboard = lazy(() => import('./components/TeamDashboard'));
+const ActionItemsPage = lazy(() => import('./components/ActionItemsPage'));
 const RequestForm = lazy(() => import('./components/RequestForm'));
 const Reports = lazy(() => import('./components/Reports'));
 const TeamManagement = lazy(() => import('./components/TeamManagement'));
-const Integrations = lazy(() => import('./components/Integrations'));
 const FormSetup = lazy(() => import('./components/FormSetup').then(m => ({ default: m.FormSetup })));
 const PublicDashboard = lazy(() => import('./components/PublicDashboard'));
 const PublicRequestForm = lazy(() => import('./components/PublicRequestForm'));
+const Login = lazy(() => import('./components/Login').then(m => ({ default: m.Login })));
+const SecuritySettings = lazy(() => import('./components/SecuritySettings').then(m => ({ default: m.SecuritySettings })));
+const Onboarding = lazy(() => import('./components/Onboarding').then(m => ({ default: m.Onboarding })));
+const DashboardLayout = lazy(() => import('./layouts/DashboardLayout').then(m => ({ default: m.DashboardLayout })));
+const TestDataProvider = lazy(() => import('./contexts/TestDataProvider').then(m => ({ default: m.TestDataProvider })));
 
-const PageLoader = () => (
-    <div className="flex items-center justify-center h-screen bg-gray-50">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-    </div>
-);
+const PageLoader = AppSkeleton;
 
 // Wrapper to inject currentUser into DashboardLayout and its children
 const AuthenticatedLayout = () => {
@@ -46,9 +43,13 @@ const AuthenticatedLayout = () => {
             {/* Under /test this swaps the whole app onto invented data; everywhere else it
                 is a passthrough. The key remounts everything below on the way in and on the
                 way out, so no page carries live rows -- or a sandbox edit -- across. */}
-            <TestDataProvider key={inTestEnvironment ? 'test' : 'live'}>
+            {inTestEnvironment ? (
+                <TestDataProvider key="test">
+                    <DashboardLayout currentUser={currentUser as User} />
+                </TestDataProvider>
+            ) : (
                 <DashboardLayout currentUser={currentUser as User} />
-            </TestDataProvider>
+            )}
         </MemberViewProvider>
     );
 };
@@ -61,12 +62,38 @@ const AuthenticatedRoutes = () => {
 
     // Where "/" and anything unrecognised lands, for everyone. Not having a team is no longer a
     // restricted state -- see ProtectedRoute -- so there is nothing to route around.
-    const home = '/workload';
+    const home = '/dashboard';
 
     const wrap = (Component: React.ReactNode) => (
         <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
             {Component}
         </div>
+    );
+
+    // A page that throws should cost you that page, not the header, the sidebar and your
+    // place in the app. Keyed on the path so walking away from a broken page clears the
+    // error rather than leaving the boundary stuck on it for the rest of the session.
+    const guard = (element: React.ReactNode, path: string) => (
+        <ErrorBoundary
+            key={path}
+            label={`the ${path} page`}
+            fallback={
+                <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-16 w-full text-center">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-2">This page could not be displayed</h2>
+                    <p className="text-sm text-gray-500 mb-5">
+                        Everything else still works — use the sidebar to go somewhere else, or reload to try again.
+                    </p>
+                    <button
+                        onClick={() => window.location.reload()}
+                        className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
+                    >
+                        Reload
+                    </button>
+                </div>
+            }
+        >
+            {element}
+        </ErrorBoundary>
     );
 
     // One table, mounted twice: once at the real paths and once under /test for the super
@@ -77,10 +104,8 @@ const AuthenticatedRoutes = () => {
         { path: 'workload', element: <WorkloadDashboard currentUser={user} /> },
         { path: 'tasks', element: <CalendarView currentUser={user} /> },
         { path: 'personal', element: wrap(<PersonalDashboard currentUser={user} />) },
-        { path: 'approval', element: wrap(<TaskApproval currentUser={user} />) },
-        { path: 'manager-review', element: wrap(<ManagerReview currentUser={user} />) },
+        { path: 'action-items', element: wrap(<ActionItemsPage currentUser={user} />) },
         { path: 'new-request', element: wrap(<RequestForm currentUser={user} />) },
-        { path: 'integrations', element: wrap(<Integrations currentUser={user} />) },
         { path: 'reports', element: wrap(<Reports currentUser={user} />) },
         { path: 'team-management', element: wrap(<TeamManagement currentUser={user} />) },
         // Form Setup writes the org's brands, regions and tags, which the database now accepts
@@ -97,7 +122,7 @@ const AuthenticatedRoutes = () => {
         <Routes>
             <Route path="/" element={<Navigate to={home} replace />} />
             {pages.map(page => (
-                <Route key={page.path} path={`/${page.path}`} element={page.element} />
+                <Route key={page.path} path={`/${page.path}`} element={guard(page.element, page.path)} />
             ))}
 
             {/* Anyone else asking for /test falls through to the catch-all below and lands
@@ -106,7 +131,7 @@ const AuthenticatedRoutes = () => {
                 <>
                     <Route path={TEST_PREFIX} element={<Navigate to={`${TEST_PREFIX}/workload`} replace />} />
                     {pages.map(page => (
-                        <Route key={`test-${page.path}`} path={`${TEST_PREFIX}/${page.path}`} element={page.element} />
+                        <Route key={`test-${page.path}`} path={`${TEST_PREFIX}/${page.path}`} element={guard(page.element, `test-${page.path}`)} />
                     ))}
                     <Route path={`${TEST_PREFIX}/*`} element={<Navigate to={`${TEST_PREFIX}/workload`} replace />} />
                 </>

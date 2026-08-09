@@ -1,46 +1,41 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { User } from '../types/types';
-import { tasks, users, clients, workCategories, teams } from '../data/mockData';
+import { useData } from '../contexts/DataContext';
 import { AlertTriangle, UserCheck, Calendar, TrendingUp } from 'lucide-react';
 import { getPriorityColor, getStatusBadgeColor, formatStatusLabel } from '../utils/capacityCalculations';
 import toast from 'react-hot-toast';
+import { PageSkeleton } from './Skeleton';
+import { supabase, inTestSandbox } from '../lib/supabaseClient';
+import { useAppNavigate, useOpenTask } from '../lib/appNav';
 
 interface Props {
   currentUser: User;
+  hideHeader?: boolean;
 }
 
-export default function ManagerReview({ currentUser }: Props) {
+export default function ManagerReview({ currentUser, hideHeader }: Props) {
+  const { tasks, users, clients, workCategories, teams, assignments, loading, refreshTasks, refreshAssignments } = useData();
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
+  const navigate = useAppNavigate();
+  const openTask = useOpenTask();
 
-  // Tasks requiring manager review
-  const managerReviewTasks = tasks.filter(t => t.status === 'manager_review_required');
-
-  // Overallocated employees
-  const overallocatedUsers = users.filter(u => {
-    const userTasks = tasks.filter(t =>
-      t.assignedToId === u.id &&
-      (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
-    );
-    const totalHours = userTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
-    return totalHours > u.dailyCapacity * 5; // More than a week's worth of work
-  });
-
-  // Teams with insufficient capacity
-  const teamsWithIssues = teams.map(team => {
-    const teamTasks = tasks.filter(t =>
-      t.teamIds.includes(team.id) &&
-      (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
-    );
-    const teamMembers = users.filter(u => team.memberIds.includes(u.id));
-    const totalCapacity = teamMembers.reduce((sum, u) => sum + u.dailyCapacity, 0) * 5;
-    const scheduledHours = teamTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
-
-    return {
-      team,
-      utilization: totalCapacity > 0 ? (scheduledHours / totalCapacity) * 100 : 0,
-      hasIssue: (scheduledHours / totalCapacity) > 0.8
-    };
-  }).filter(t => t.hasIssue);
+  const { managerReviewTasks, overallocatedUsers, teamsWithIssues, activeHoursByUser } = useMemo(() => {
+    const reviewTasks = tasks.filter(t => t.status === 'manager_review_required');
+    const hoursByUser = new Map<string, number>();
+    tasks.forEach(t => {
+      if (t.assignedToId && (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')) {
+        hoursByUser.set(t.assignedToId, (hoursByUser.get(t.assignedToId) || 0) + Math.max(0, t.estimatedHours - (t.actualHours || 0)));
+      }
+    });
+    const overallocated = users.filter(u => (hoursByUser.get(u.id) || 0) > u.dailyCapacity * 5);
+    const issues = teams.map(team => {
+      const teamTasks = tasks.filter(t => t.teamIds.includes(team.id) && (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'));
+      const totalCapacity = users.filter(u => team.memberIds.includes(u.id)).reduce((sum, u) => sum + u.dailyCapacity, 0) * 5;
+      const scheduledHours = teamTasks.reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
+      return { team, utilization: totalCapacity > 0 ? (scheduledHours / totalCapacity) * 100 : 0, hasIssue: totalCapacity > 0 && scheduledHours / totalCapacity > 0.8 };
+    }).filter(t => t.hasIssue);
+    return { managerReviewTasks: reviewTasks, overallocatedUsers: overallocated, teamsWithIssues: issues, activeHoursByUser: hoursByUser };
+  }, [tasks, users, teams]);
 
   // Find available team members for a task
   const getAvailableMembers = (taskId: string) => {
@@ -57,36 +52,52 @@ export default function ManagerReview({ currentUser }: Props) {
       if (!hasSkills) return false;
 
       // Calculate current workload
-      const userTasks = tasks.filter(t =>
-        t.assignedToId === u.id &&
-        (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
-      );
-      const totalHours = userTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
+      const totalHours = activeHoursByUser.get(u.id) || 0;
 
       return totalHours < u.dailyCapacity * 5; // Has capacity
     });
   };
 
-  const handleAssignTask = (taskId: string, userId: string) => {
-    console.log('Assigning task', taskId, 'to user', userId);
-    toast.success(`Task would be assigned to ${users.find(u => u.id === userId)?.name}`);
+  const handleAssignTask = async (taskId: string, userId: string) => {
+    if (inTestSandbox()) {
+      toast('Assigning is switched off in the test environment.', { icon: '🧪' });
+      return;
+    }
+    const activeAssignment = assignments.find(a => a.taskId === taskId && (a.status === 'pending' || a.status === 'accepted'));
+    const { error } = await supabase.rpc('assign_task_checked', {
+      p_task_id: taskId,
+      p_user_id: userId,
+      p_auto_accept: userId === currentUser.id,
+      p_expected_assignment_id: activeAssignment?.id || null,
+      p_expected_status: activeAssignment?.status || null,
+    });
+    if (error) {
+      toast.error(error.message || 'Could not assign task.');
+      return;
+    }
+    await Promise.all([refreshTasks(), refreshAssignments()]);
+    toast.success(`Assigned to ${users.find(u => u.id === userId)?.name || 'team member'}.`);
   };
 
   const handleChangeDeadline = (taskId: string) => {
-    toast('This would open a dialog to change the deadline');
+    openTask(taskId);
   };
 
   const handleSplitTask = (taskId: string) => {
-    toast('This would open a dialog to split the task into multiple subtasks');
+    openTask(taskId);
   };
+
+  if (loading) return <PageSkeleton variant="review" />;
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-900">Review Queue</h1>
-        <p className="text-sm text-gray-600 mt-1">Tasks and capacity issues requiring management attention</p>
-      </div>
+      {!hideHeader && (
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">Review Queue</h1>
+          <p className="text-sm text-gray-600 mt-1">Tasks and capacity issues requiring management attention</p>
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-3 gap-4">
@@ -269,9 +280,6 @@ export default function ManagerReview({ currentUser }: Props) {
                       >
                         Split Task
                       </button>
-                      <button className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
-                        Override & Assign
-                      </button>
                     </div>
                   </div>
                 </div>
@@ -324,7 +332,10 @@ export default function ManagerReview({ currentUser }: Props) {
                     <div className="text-xs text-gray-600 mb-1">
                       {userTasks.length} active tasks
                     </div>
-                    <button className="text-xs text-blue-600 hover:text-blue-700 font-medium">
+                    <button
+                      onClick={() => navigate(`/tasks?assignee=${user.id}`)}
+                      className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                    >
                       View Tasks & Reassign →
                     </button>
                   </div>

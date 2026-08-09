@@ -112,6 +112,11 @@ export function TestDataProvider({ children }: { children: React.ReactNode }) {
     const value = useMemo<DataContextType>(() => ({
         ...dataset,
         loading: false,
+        loadIssues: [],
+        retryDataLoad: noop,
+        hasMoreTasks: false,
+        loadingMoreTasks: false,
+        loadMoreTasks: noop,
         refreshTasks: noop,
         refreshTeams: noop,
         refreshTags: noop,

@@ -1,15 +1,17 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { User, Task, TaskStatus } from '../types/types';
 import { useData } from '../contexts/DataContext';
 import { ChevronLeft, ChevronRight, ChevronDown, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
-import { getDatesInRange, getPriorityColor, getTimelineColumns, getProjectTimelineBounds, getStatusBadgeColor, formatStatusLabel } from '../utils/capacityCalculations';
+import { getDatesInRange, getPriorityColor, getTimelineColumns, getProjectTimelineBounds, getStatusBadgeColor, formatStatusLabel, startOfToday } from '../utils/capacityCalculations';
 import TaskDetailsPanel from './TaskDetailsPanel';
 import TimelineView from './TimelineView';
 import { TimelineContainer } from './TimelineContainer';
 import { useTestEnvironment } from '../lib/testEnvironment';
 import { useMemberFilter } from '../contexts/MemberViewContext';
 import { getTagStyle } from '../utils/colors';
+import { useVirtualWindow } from '../lib/useVirtualWindow';
+import { PageSkeleton } from './Skeleton';
 import {
     Priority, Status, Brand,
     PRIORITY_CONFIG, STATUS_CONFIG, BRAND_CONFIG,
@@ -45,9 +47,11 @@ const pendingClass = (task: Task) => (isPendingAcceptance(task) ? ' task-pending
 
 export default function CalendarView({ currentUser }: Props) {
   const { users, teams, tasks, clients, regions, allTags, skills, workCategories, loading } = useData();
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [currentDate, setCurrentDate] = useState(new Date('2026-07-28'));
+  // Opens on today. It used to open on a fixed 28 July 2026 while the Today button beside it
+  // jumped to the real date, so the month you landed on and the month that button took you to
+  // drifted further apart every day.
+  const [currentDate, setCurrentDate] = useState(startOfToday);
   const [pageMode, setPageMode] = useState<TaskPageMode>('list');
   // Still unfinished, so it lives only in the test environment (/test/tasks) and only for
   // the super admin. Everyone else gets calendar/list/board and no way to the timeline.
@@ -297,7 +301,7 @@ export default function CalendarView({ currentUser }: Props) {
   };
 
   const handleStatusChange = (taskId: string, newStatus: string) => {
-    console.log('Updating task', taskId, 'to status', newStatus);
+    setSelectedTask(prev => prev?.id === taskId ? { ...prev, status: newStatus as TaskStatus } : prev);
   };
 
   // Get days in month
@@ -667,6 +671,8 @@ export default function CalendarView({ currentUser }: Props) {
 
 
   const activeTasks = filteredTasks;
+  const topLevelListTasks = useMemo(() => activeTasks.filter(t => !t.isSubtask), [activeTasks]);
+  const listWindow = useVirtualWindow(topLevelListTasks.length, 54, 600, 8);
 
   const getUserTeam = (userId: string) => {
     const user = users.find(u => u.id === userId);
@@ -791,11 +797,18 @@ export default function CalendarView({ currentUser }: Props) {
 
   const renderListView = () => {
       // Only show top level tasks in the root of the table that match the filters
-      const topLevelTasks = activeTasks.filter(t => !t.isSubtask);
+      const topLevelTasks = topLevelListTasks;
+      const windowedTasks = topLevelTasks.length > 40
+          ? topLevelTasks.slice(listWindow.start, listWindow.end)
+          : topLevelTasks;
       
       return (
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm">
-              <div className="overflow-x-auto">
+              <div
+                  className="overflow-auto"
+                  style={topLevelTasks.length > 40 ? { maxHeight: listWindow.viewportHeight } : undefined}
+                  onScroll={topLevelTasks.length > 40 ? listWindow.onScroll : undefined}
+              >
                   <table className="w-full text-left border-collapse">
                       <thead className="bg-gray-50 border-b border-gray-200">
                           <tr>
@@ -810,11 +823,19 @@ export default function CalendarView({ currentUser }: Props) {
                       </thead>
                       <tbody className="bg-white">
                           {topLevelTasks.length > 0 ? (
-                              topLevelTasks.map(t => (
+                              <>
+                              {topLevelTasks.length > 40 && listWindow.paddingTop > 0 && (
+                                  <tr aria-hidden="true"><td colSpan={7} style={{ height: listWindow.paddingTop, padding: 0 }} /></tr>
+                              )}
+                              {windowedTasks.map(t => (
                                   <React.Fragment key={t.id}>
                                       {renderTaskRow(t, 0)}
                                   </React.Fragment>
-                              ))
+                              ))}
+                              {topLevelTasks.length > 40 && listWindow.paddingBottom > 0 && (
+                                  <tr aria-hidden="true"><td colSpan={7} style={{ height: listWindow.paddingBottom, padding: 0 }} /></tr>
+                              )}
+                              </>
                           ) : (
                               <tr>
                                   <td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">
@@ -936,6 +957,8 @@ export default function CalendarView({ currentUser }: Props) {
 
   // min-h-full, not min-h-screen: this renders below the dashboard header, so a full
   // viewport of height here overflows the pane it sits in by exactly that header.
+  if (loading) return <PageSkeleton variant="reports" />;
+
   return (
     <div className="min-h-full font-sans" style={{ backgroundColor: '#f9fafb' }}>
         {/* Header */}

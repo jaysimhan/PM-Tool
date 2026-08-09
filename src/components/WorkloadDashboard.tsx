@@ -34,7 +34,7 @@ const FreezeEdge = ({ side }: { side: 'left' | 'right' }) => (
 );
 
 export default function WorkloadDashboard({ currentUser }: Props) {
-    const { users, teams, tasks, leaves, clients, regions, allTags, workCategories } = useData();
+    const { users, teams, tasks, leaves, clients, regions, allTags, workCategories, hasMoreTasks, loadingMoreTasks, loadMoreTasks } = useData();
     const [localTasks, setLocalTasks] = useState(tasks);
     
     useEffect(() => {
@@ -250,8 +250,12 @@ export default function WorkloadDashboard({ currentUser }: Props) {
     };
 
     const handleStatusChange = (taskId: string, newStatus: string) => {
-        console.log('Updating task', taskId, 'to status', newStatus);
-        // In a real app, this would update the backend        // We might want to add a toast notification here later instead of an alert
+        setLocalTasks(prev => prev.map(task => task.id === taskId
+            ? { ...task, status: newStatus as Task['status'] }
+            : task));
+        setSelectedTask(prev => prev?.id === taskId
+            ? { ...prev, status: newStatus as Task['status'] }
+            : prev);
     };
 
     const membersByTeam = useMemo(() => {
@@ -1152,6 +1156,13 @@ export default function WorkloadDashboard({ currentUser }: Props) {
                 {viewMode === 'list' && renderListView()}
                 {viewMode === 'board' && renderBoardView()}
                 {viewMode === 'timeline' && showTimeline && renderTimelineView()}
+                {hasMoreTasks && (
+                    <div className="flex justify-center pt-6">
+                        <button type="button" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()} className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-wait disabled:opacity-60">
+                            {loadingMoreTasks ? 'Loading…' : 'Load 250 older tasks'}
+                        </button>
+                    </div>
+                )}
             </div>
 
             {/* Task Details Panel */}

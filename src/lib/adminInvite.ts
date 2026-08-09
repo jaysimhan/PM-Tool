@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient';
+import { captureOperationalError } from './observability';
 
 /**
  * The browser half of the admin-invite function.
@@ -10,10 +11,12 @@ import { supabase } from './supabaseClient';
  */
 
 export interface InviteResult {
-    /** Supabase delivered the mail itself. False means there is a link to pass on by hand. */
+    /** Temporary credentials are always handed to the administrator, never emailed by Auth. */
     sent: boolean;
-    /** Present when the mail could not be sent, or for a re-sent setup link. */
-    actionLink: string | null;
+    /** Shown once. The server stores only its hash. */
+    temporaryPassword: string | null;
+    /** Exactly three days after generation. */
+    expiresAt: string | null;
     userId: string | null;
 }
 
@@ -24,12 +27,8 @@ const messages: Record<string, string> = {
     team_required: 'Team leaders can only invite people into their own team.',
     not_your_team: 'You can only invite people into a team you belong to.',
     invalid_email: 'That is not a valid email address.',
-    redirect_not_allowed: 'This site is not on the allowed redirect list for invites.',
-    redirect_not_configured:
-        'Invites are not configured for this site yet, so nobody can be invited from it. An admin'
-        + ' needs to set ALLOWED_REDIRECT_ORIGINS on the admin-invite function to this site\'s'
-        + ' address. Invites still work from localhost, which is why this only shows up here.',
-    redirect_not_https: 'Invites can only be sent from a secure (https) site.',
+    not_waiting_for_setup: 'That account is not waiting for setup.',
+    credential_failed: 'The temporary password could not be generated.',
 };
 
 /** Anything that comes back from the function unhappy, turned into one sentence. */
@@ -45,7 +44,7 @@ function describe(error: unknown, payload: unknown): string {
 
 async function call(body: Record<string, unknown>): Promise<InviteResult> {
     const { data, error } = await supabase.functions.invoke('admin-invite', {
-        body: { ...body, redirectTo: `${window.location.origin}/welcome` },
+        body,
     });
 
     // A non-2xx reply arrives as an error with the body attached, so the reason the function
@@ -60,14 +59,19 @@ async function call(body: Record<string, unknown>): Promise<InviteResult> {
                 /* Keep whatever data we already have. */
             }
         }
+        captureOperationalError('invite_generation', error, { action: String(body.action || 'unknown') });
         throw new Error(describe(error, payload));
     }
 
-    if (!data?.ok) throw new Error(describe(null, data));
+    if (!data?.ok) {
+        captureOperationalError('invite_generation', { name: 'FunctionRejected', code: data?.error }, { action: String(body.action || 'unknown') });
+        throw new Error(describe(null, data));
+    }
 
     return {
         sent: Boolean(data.sent),
-        actionLink: (data.actionLink as string | null) ?? null,
+        temporaryPassword: (data.temporaryPassword as string | null) ?? null,
+        expiresAt: (data.expiresAt as string | null) ?? null,
         userId: (data.userId as string | null) ?? null,
     };
 }
@@ -76,8 +80,6 @@ async function call(body: Record<string, unknown>): Promise<InviteResult> {
 export const inviteUser = (params: { email: string; name?: string; teamId?: string | null }) =>
     call({ action: 'invite', email: params.email, name: params.name ?? '', teamId: params.teamId ?? null });
 
-// There is no sendSetupLink any more. A setup link used to be minted per person and expired,
-// which is what kept breaking between the mail going out and the person clicking it. The link
-// is now one permanent public URL (/welcome) that grants nothing on its own -- what gets somebody
-// in is the one-time code that page mails to an approved address. The Edge Function still
-// implements the 'setup-link' action; nothing in the app asks for it.
+/** Replace any previous credential and issue a new three-day temporary password. */
+export const generateSetupPassword = (email: string) =>
+    call({ action: 'setup-password', email });

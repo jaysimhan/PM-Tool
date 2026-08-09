@@ -1,6 +1,6 @@
 // Inviting somebody, without shipping the keys to the kingdom to do it.
 //
-// inviteUserByEmail and generateLink are admin endpoints: they need the service role key, and
+// Creating Auth users and issuing onboarding credentials need the service role key, and
 // the service role key bypasses every policy in the database and can mint a session for any
 // account. Team Management used to call them straight from the browser, which meant that key
 // was in the JavaScript bundle -- readable by anyone who loaded the page, signed in or not.
@@ -33,48 +33,27 @@ const json = (body: unknown, status = 200) =>
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
+const deny = (reason: string, status: number) => {
+    console.warn(JSON.stringify({ event: 'edge_authorization_denied', function: 'admin-invite', reason, status }));
+    return json({ error: reason }, status);
+};
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * Where the invitee lands. An invite link is a bearer credential -- follow it and you are
- * signed in as that address -- so a caller does not get to aim it at a host of their choosing.
- * The path is fixed here, and the origin has to be one we allow: whatever is in
- * ALLOWED_REDIRECT_ORIGINS, or localhost when that is unset for local development.
- *
- * GoTrue independently refuses any redirect that is not on the project's Redirect URLs list,
- * so this is the second lock rather than the only one.
- */
-function resolveRedirect(requested: unknown): { url: string } | { error: string } {
-    const configured = (Deno.env.get('ALLOWED_REDIRECT_ORIGINS') ?? '')
-        .split(',')
-        .map((o) => o.trim().replace(/\/$/, ''))
-        .filter(Boolean);
+const CREDENTIAL_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
 
-    if (typeof requested !== 'string' || !requested) return { error: 'missing_redirect' };
+/** High entropy, readable, and guaranteed to satisfy the permanent-password character rules. */
+function temporaryPassword(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(18));
+    const random = Array.from(bytes, (byte) => CREDENTIAL_ALPHABET[byte % CREDENTIAL_ALPHABET.length]).join('');
+    return `T!7a-${random}`;
+}
 
-    let parsed: URL;
-    try {
-        parsed = new URL(requested);
-    } catch {
-        return { error: 'invalid_redirect' };
-    }
-
-    const origin = parsed.origin.replace(/\/$/, '');
-    const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-    const allowed = configured.length > 0 ? configured.includes(origin) || isLocal : isLocal;
-
-    // Unset ALLOWED_REDIRECT_ORIGINS leaves localhost as the only permitted origin, which is the
-    // right default -- but it means every invite from the deployed site is refused while every
-    // invite from a dev machine works, and the two are indistinguishable under one error code.
-    // That cost us a round of "invites are broken and the logs just say not allowed", so the
-    // empty list gets to say it is empty. Nothing is permitted that was not permitted before.
-    if (!allowed && configured.length === 0) return { error: 'redirect_not_configured' };
-    if (!allowed) return { error: 'redirect_not_allowed' };
-    if (parsed.protocol !== 'https:' && !isLocal) return { error: 'redirect_not_https' };
-
-    // Onboarding is the only place an invite has ever needed to land.
-    return { url: `${origin}/welcome` };
+/** Never returned. It prevents the Auth account itself from using the temporary credential. */
+function unreachableAuthPassword(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    return `R!8z-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
 Deno.serve(async (req) => {
@@ -82,7 +61,7 @@ Deno.serve(async (req) => {
     if (req.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
 
     const authHeader = req.headers.get('Authorization') ?? '';
-    if (!authHeader.toLowerCase().startsWith('bearer ')) return json({ error: 'not_signed_in' }, 401);
+    if (!authHeader.toLowerCase().startsWith('bearer ')) return deny('not_signed_in', 401);
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -95,7 +74,7 @@ Deno.serve(async (req) => {
     const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
 
     const { data: caller, error: callerError } = await asCaller.auth.getUser();
-    if (callerError || !caller?.user) return json({ error: 'not_signed_in' }, 401);
+    if (callerError || !caller?.user) return deny('not_signed_in', 401);
 
     const { data: profile, error: profileError } = await admin
         .from('users')
@@ -105,7 +84,7 @@ Deno.serve(async (req) => {
 
     if (profileError) return json({ error: 'lookup_failed', detail: profileError.message }, 500);
     if (!profile || profile.is_active === false || profile.deleted_at) {
-        return json({ error: 'account_not_active' }, 403);
+        return deny('account_not_active', 403);
     }
 
     let body: Record<string, unknown>;
@@ -115,7 +94,7 @@ Deno.serve(async (req) => {
         return json({ error: 'invalid_json' }, 400);
     }
 
-    const action = body.action === 'setup-link' ? 'setup-link' : 'invite';
+    const action = body.action === 'setup-password' ? 'setup-password' : 'invite';
     const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     const name = typeof body.name === 'string' ? body.name.trim().slice(0, 120) : '';
     const teamId = typeof body.teamId === 'string' && UUID_RE.test(body.teamId) ? body.teamId : null;
@@ -123,11 +102,12 @@ Deno.serve(async (req) => {
     if (!EMAIL_RE.test(email)) return json({ error: 'invalid_email' }, 400);
 
     const isAdmin = profile.role === 'super_admin' || profile.role === 'admin';
+    if (action === 'setup-password' && !isAdmin) return deny('not_allowed', 403);
     if (!isAdmin) {
         // A leader may only invite into their own team, so an invite with no team attached --
         // which is what the access-request queue sends -- is out of their reach entirely.
-        if (profile.role !== 'team_leader') return json({ error: 'not_allowed' }, 403);
-        if (!teamId) return json({ error: 'team_required' }, 403);
+        if (profile.role !== 'team_leader') return deny('not_allowed', 403);
+        if (!teamId) return deny('team_required', 403);
 
         const { data: membership, error: membershipError } = await admin
             .from('team_members')
@@ -137,11 +117,8 @@ Deno.serve(async (req) => {
             .maybeSingle();
 
         if (membershipError) return json({ error: 'lookup_failed', detail: membershipError.message }, 500);
-        if (!membership) return json({ error: 'not_your_team' }, 403);
+        if (!membership) return deny('not_your_team', 403);
     }
-
-    const redirect = resolveRedirect(body.redirectTo);
-    if ('error' in redirect) return json({ error: redirect.error }, 400);
 
     // The team rides along in user_metadata: team_members.user_id references public.users, and
     // an invitee has no row there until onboarding creates one, which is where this is applied.
@@ -149,51 +126,72 @@ Deno.serve(async (req) => {
     if (name) metadata.name = name;
     if (teamId) metadata.team_id = teamId;
 
-    if (action === 'setup-link') {
-        // Their auth identity exists but they never finished setup, so an invite would be
-        // refused as a duplicate. A magic link puts them back on the same screen.
-        const { data, error } = await admin.auth.admin.generateLink({
-            type: 'magiclink',
-            email,
-            options: { redirectTo: redirect.url },
-        });
-        if (error || !data?.user) {
-            return json({ error: 'link_failed', detail: error?.message ?? 'unknown error' }, 502);
+    let userId: string;
+
+    if (action === 'setup-password') {
+        const { data: existing, error: existingError } = await admin
+            .from('users')
+            .select('id, onboarding_completed, is_active, deleted_at')
+            .ilike('email', email)
+            .maybeSingle();
+        if (existingError) return json({ error: 'lookup_failed', detail: existingError.message }, 500);
+        if (!existing || existing.onboarding_completed || !existing.is_active || existing.deleted_at) {
+            return json({ error: 'not_waiting_for_setup' }, 409);
         }
-        return json({ ok: true, userId: data.user.id, actionLink: data.properties?.action_link ?? null });
+        userId = existing.id;
+
+        // Invalidate any password that may have been set during an abandoned setup attempt.
+        const { error: rotateError } = await admin.auth.admin.updateUserById(userId, {
+            password: unreachableAuthPassword(),
+        });
+        if (rotateError) return json({ error: 'credential_failed', detail: rotateError.message }, 502);
+    } else {
+        const { data: created, error: createError } = await admin.auth.admin.createUser({
+            email,
+            password: unreachableAuthPassword(),
+            email_confirm: true,
+            user_metadata: metadata,
+        });
+        if (createError || !created?.user) {
+            return json({ error: 'invite_failed', detail: createError?.message ?? 'unknown error' }, 502);
+        }
+        userId = created.user.id;
+
+        // The Auth trigger normally creates this row in the same transaction. Keep the Edge
+        // Function resilient to a missing/disabled trigger without overwriting a row it did
+        // create: the credential RPC intentionally refuses an identity that is not an invitee.
+        const { error: profileInsertError } = await admin.from('users').upsert({
+            id: userId,
+            name: name || email,
+            email,
+            role: 'invitee',
+            daily_capacity: 8,
+            is_active: true,
+            onboarding_completed: false,
+        }, { onConflict: 'id', ignoreDuplicates: true });
+        if (profileInsertError) {
+            await admin.auth.admin.deleteUser(userId);
+            return json({ error: 'invite_failed', detail: profileInsertError.message }, 502);
+        }
     }
 
-    const { data: invited, error: inviteError } = await admin.auth.admin.inviteUserByEmail(email, {
-        redirectTo: redirect.url,
-        data: metadata,
+    const credential = temporaryPassword();
+    const { data: issued, error: issueError } = await admin.rpc('issue_onboarding_temp_password', {
+        p_user_id: userId,
+        p_temp_password: credential,
+        p_generated_by: profile.id,
     });
-
-    if (invited?.user) {
-        return json({ ok: true, sent: true, userId: invited.user.id, actionLink: null });
-    }
-
-    // Supabase only delivers invite mail once custom SMTP is configured. Mint the same link so
-    // the admin can pass it on by hand instead of the invite being lost.
-    const { data: link, error: linkError } = await admin.auth.admin.generateLink({
-        type: 'invite',
-        email,
-        options: { redirectTo: redirect.url, data: metadata },
-    });
-
-    if (linkError || !link?.user) {
-        return json(
-            {
-                error: 'invite_failed',
-                detail: inviteError?.message ?? linkError?.message ?? 'unknown error',
-            },
-            502,
-        );
+    if (issueError || !issued?.ok) {
+        // A new identity without a usable credential is misleading and blocks a retry by email.
+        if (action === 'invite') await admin.auth.admin.deleteUser(userId);
+        return json({ error: 'credential_failed', detail: issueError?.message ?? 'unknown error' }, 502);
     }
 
     return json({
         ok: true,
         sent: false,
-        userId: link.user.id,
-        actionLink: link.properties?.action_link ?? null,
+        userId,
+        temporaryPassword: credential,
+        expiresAt: issued.expiresAt,
     });
 });

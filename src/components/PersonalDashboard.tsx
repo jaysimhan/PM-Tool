@@ -1,50 +1,70 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { User } from '../types/types';
-import { tasks, clients, workCategories } from '../data/mockData';
+import { useData } from '../contexts/DataContext';
 import { Clock, CheckCircle, AlertCircle, Calendar } from 'lucide-react';
-import { getStatusBadgeColor, formatStatusLabel, getPriorityColor } from '../utils/capacityCalculations';
+import { getStatusBadgeColor, formatStatusLabel, getPriorityColor, startOfToday, isTaskOverdue } from '../utils/capacityCalculations';
+import { PageSkeleton } from './Skeleton';
+import { useOpenTask } from '../lib/appNav';
 
 interface Props {
     currentUser: User;
 }
 
 export default function PersonalDashboard({ currentUser }: Props) {
-    // Get user's tasks
-    const myTasks = tasks.filter(t => t.assignedToId === currentUser.id);
+    const openTask = useOpenTask();
+    // This page used to read src/data/mockData, whose arrays are empty in every build. It
+    // therefore said "No tasks scheduled for today" to everybody, every day, no matter what
+    // they actually had on -- and the capacity bar it leads with was permanently 0%.
+    const { tasks, clients, workCategories, loading } = useData();
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = startOfToday();
 
-    const todayTasks = myTasks.filter(t => {
-        if (t.status === 'completed' || t.status === 'cancelled') return false;
-        if (!t.proposedStartDate) return false;
-        const startDate = new Date(t.proposedStartDate);
-        return startDate <= today && (t.status === 'in_progress' || t.status === 'accepted' || t.status === 'scheduled');
-    });
+    const view = useMemo(() => {
+        const myTasks = tasks.filter(t => t.assignedToId === currentUser.id);
 
-    const upcomingTasks = myTasks.filter(t => {
-        if (t.status === 'completed' || t.status === 'cancelled') return false;
-        if (!t.proposedStartDate) return false;
-        const startDate = new Date(t.proposedStartDate);
-        return startDate > today;
-    });
+        const isOpen = (t: typeof myTasks[number]) => t.status !== 'completed' && t.status !== 'cancelled';
 
-    const completedTasks = myTasks.filter(t => t.status === 'completed');
-    const overdueTasks = myTasks.filter(t => {
-        if (t.status === 'completed' || t.status === 'cancelled') return false;
-        return new Date(t.dueDate) < today;
-    });
+        const todayTasks = myTasks.filter(t => {
+            if (!isOpen(t) || !t.proposedStartDate) return false;
+            return new Date(t.proposedStartDate) <= today
+                && (t.status === 'in_progress' || t.status === 'accepted' || t.status === 'scheduled');
+        });
 
-    // Calculate capacity for today
-    const todayHours = todayTasks.reduce((sum, task) => {
-        if (!task.proposedStartDate || !task.proposedEndDate) return sum;
-        const start = new Date(task.proposedStartDate);
-        const end = new Date(task.proposedEndDate);
-        const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
-        return sum + (task.estimatedHours / days);
-    }, 0);
+        const upcomingTasks = myTasks.filter(t => {
+            if (!isOpen(t) || !t.proposedStartDate) return false;
+            return new Date(t.proposedStartDate) > today;
+        });
 
-    const utilizationPercent = (todayHours / currentUser.dailyCapacity) * 100;
+        // Shares the one definition of overdue with the dashboards and the calendar, so a task
+        // cannot be late here and on time there.
+        const overdueTasks = myTasks.filter(t => isTaskOverdue(t, today));
+
+        // A task spanning several days only costs today its share of the estimate.
+        const todayHours = todayTasks.reduce((sum, task) => {
+            if (!task.proposedStartDate || !task.proposedEndDate) return sum;
+            const start = new Date(task.proposedStartDate);
+            const end = new Date(task.proposedEndDate);
+            const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+            return sum + (task.estimatedHours / days);
+        }, 0);
+
+        return {
+            todayTasks,
+            upcomingTasks,
+            completedTasks: myTasks.filter(t => t.status === 'completed'),
+            overdueTasks,
+            todayHours,
+        };
+    }, [tasks, currentUser.id, today.getTime()]);
+
+    const { todayTasks, upcomingTasks, completedTasks, overdueTasks, todayHours } = view;
+
+    // A capacity of zero would otherwise render Infinity% and a bar of NaN width.
+    const utilizationPercent = currentUser.dailyCapacity > 0
+        ? (todayHours / currentUser.dailyCapacity) * 100
+        : 0;
+
+    if (loading) return <PageSkeleton variant="personal" />;
 
     return (
         <div className="space-y-6">
@@ -60,7 +80,7 @@ export default function PersonalDashboard({ currentUser }: Props) {
                     <div>
                         <h2 className="text-lg font-semibold">Today's Capacity</h2>
                         <p className="text-sm opacity-90 mt-1">
-                            {new Date('2026-07-28').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+                            {startOfToday().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
                         </p>
                     </div>
                     <div className="text-right">
@@ -262,7 +282,10 @@ export default function PersonalDashboard({ currentUser }: Props) {
                                                 </span>
                                             </div>
                                         </div>
-                                        <button className="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700">
+                                        <button
+                                            onClick={() => openTask(task.id)}
+                                            className="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700"
+                                        >
                                             Update
                                         </button>
                                     </div>

@@ -16,7 +16,7 @@ interface Props {
 type ZoomLevel = 'days' | 'weeks' | 'months';
 
 export default function TimelineView({ currentUser }: Props) {
-    const { users, tasks, refreshTasks, refreshAssignments } = useData();
+    const { users, tasks, assignments, refreshTasks, refreshAssignments } = useData();
     const memberFilter = useMemberFilter();
     const [zoom, setZoom] = useState<ZoomLevel>('days');
     const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
@@ -163,10 +163,13 @@ export default function TimelineView({ currentUser }: Props) {
             if (inTestSandbox()) {
                 toast('Assigning is switched off in the test environment.', { icon: '🧪' });
             } else {
-                const { error } = await supabase.rpc('assign_task', {
+                const activeAssignment = assignments.find(a => a.taskId === taskId && (a.status === 'pending' || a.status === 'accepted'));
+                const { error } = await supabase.rpc('assign_task_checked', {
                     p_task_id: taskId,
                     p_user_id: assigneeId,
-                    p_auto_accept: assigneeId === currentUser.id
+                    p_auto_accept: assigneeId === currentUser.id,
+                    p_expected_assignment_id: activeAssignment?.id || null,
+                    p_expected_status: activeAssignment?.status || null,
                 });
                 if (error) {
                     toast.error(error.message || 'Could not assign this task.');

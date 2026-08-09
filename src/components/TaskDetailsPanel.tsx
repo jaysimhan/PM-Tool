@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Task, User, Comment, Team, Priority, Tag as TagType, TaskActivity, isPreMember } from '../types/types';
 import { supabase, inTestSandbox } from '../lib/supabaseClient';
 import toast from 'react-hot-toast';
 import AcceptTaskModal from './AcceptTaskModal';
 import { useData } from '../contexts/DataContext';
-import { clients, workCategories, teams, tasks as allTasks, mockComments } from '../data/mockData';
 import {
     X, Calendar, User as UserIcon, Paperclip,
     CheckCircle, Link as LinkIcon, Plus, Clock,
@@ -14,6 +13,7 @@ import {
 import { getRandomColor, getDiverseColors, getTagStyle } from '../utils/colors';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { formatCustomValue, useRequestFormConfig } from '../lib/requestFormConfig';
+import { captureOperationalError } from '../lib/observability';
 
 const TAG_COLORS = [
     { name: 'default', class: 'bg-gray-100 text-gray-700' },
@@ -75,7 +75,8 @@ const SAVED_TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const dormantLabel = (user?: User | null) =>
     user?.deletedAt ? 'deleted' : user && user.isActive === false ? 'deactivated' : null;
 
-function Avatar({ user, size = 'sm' }: { user?: User | null; size?: 'xs' | 'sm' | 'md' }) {
+const Avatar = React.memo(function Avatar({ user, size = 'sm' }: { user?: User | null; size?: 'xs' | 'sm' | 'md' }) {
+    const { teams } = useData();
     const sizeClasses = { xs: 'w-6 h-6 text-[10px]', sm: 'w-8 h-8 text-xs', md: 'w-9 h-9 text-sm' };
     const dormant = isDormant(user);
 
@@ -115,7 +116,7 @@ function Avatar({ user, size = 'sm' }: { user?: User | null; size?: 'xs' | 'sm' 
             {initials}
         </div>
     );
-}
+});
 
 function SectionLabel({ children, icon }: { children: React.ReactNode, icon?: React.ReactNode }) {
     return <div className="text-[15px] font-semibold text-gray-900 mb-3 flex items-center gap-2">{icon && <span className="text-gray-400">{icon}</span>}{children}</div>;
@@ -130,8 +131,10 @@ function FieldRow({ label, icon, children }: { label: React.ReactNode; icon?: Re
     );
 }
 
-export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, isSubPanel = false, parentTitle = "", depth = 0, onNestedDepthChange, activeDepth, onActiveDepthChange }: Props) {
+function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, isSubPanel = false, parentTitle = "", depth = 0, onNestedDepthChange, activeDepth, onActiveDepthChange }: Props) {
     const { confirm } = useConfirm();
+    const { allTags, refreshTags, refreshTasks, regions, users, teams, clients, workCategories,
+        tasks, comments: contextComments, assignments, refreshAssignments } = useData();
     // Only needed to turn a stored field_key back into the label the requester saw.
     const { fields: requestFormFields } = useRequestFormConfig();
     const isTeamLeaderOfTask = currentUser.role === 'team_leader' && teams.some(t => task?.teamIds.includes(t.id) && t.memberIds.includes(currentUser.id));
@@ -164,8 +167,6 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
     const [showStatusDropdown, setShowStatusDropdown] = useState(false);
     const [isFullScreen, setIsFullScreen] = useState(false);
-    const [showCollabPicker, setShowCollabPicker] = useState(false);
-    const [collabSearch, setCollabSearch] = useState('');
     const [showDatePicker, setShowDatePicker] = useState(false);
     const datePickerRef = useRef<HTMLDivElement>(null);
     const [localStartDate, setLocalStartDate] = useState('');
@@ -187,7 +188,8 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     const [localTags, setLocalTags] = useState<TagType[]>(task?.tags || []);
     // users comes from the live data context, not mockData: the assignee and collaborator
     // pickers were reading an array that is empty in every build, so they offered nobody.
-    const { allTags, refreshTags, refreshTasks, regions, users, assignments, refreshAssignments } = useData();
+    const [draftTasks, setDraftTasks] = useState<Task[]>([]);
+    const allTasks = useMemo(() => [...tasks, ...draftTasks], [tasks, draftTasks]);
     const [tagSearchQuery, setTagSearchQuery] = useState('');
     const [editingTag, setEditingTag] = useState<string | null>(null);
     const [editingTagName, setEditingTagName] = useState('');
@@ -216,7 +218,6 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     const depPopoverRef = useRef<HTMLDivElement>(null);
     const statusRef = useRef<HTMLDivElement>(null);
     const priorityRef = useRef<HTMLDivElement>(null);
-    const collabPickerRef = useRef<HTMLDivElement>(null);
     const moreMenuRef = useRef<HTMLDivElement>(null);
 
     const [localActiveDepth, setLocalActiveDepth] = useState(0);
@@ -252,12 +253,12 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             setLocalBlockedBy(task.blockedByIds || []);
             setLocalBlocks(task.blocksIds || []);
             setLocalLinked(task.linkedTaskIds || task.dependencyIds || []);
-            setComments(mockComments.filter(c => c.taskId === task.id));
             setLocalStartDate(task.proposedStartDate || '');
             setLocalDueDate(task.dueDate || task.proposedEndDate || '');
-            // Build default collaborators: Admins, Assignee, and Team Leads
+            // Display only durable task relationships; this is a read-only participant list,
+            // not an implied collaborator ACL.
             const initialCollabs = users.filter(u => {
-                if (u.role === 'super_admin' || u.role === 'admin') return true;
+                if (u.id === task.requesterId) return true;
                 if (u.id === task.assignedToId) return true;
                 if (u.role === 'team_leader' && task.teamIds?.some(tid => {
                     const t = teams.find(team => team.id === tid);
@@ -273,7 +274,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             setLocalSubtaskIds(task.subtaskIds || []);
             setStackedSubtask(null);
         }
-    }, [task]);
+    }, [task, users, teams]);
 
     // Reset full-screen when panel closes
     useEffect(() => {
@@ -290,7 +291,6 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             if (statusRef.current && !statusRef.current.contains(e.target as Node)) setShowStatusDropdown(false);
             if (priorityRef.current && !priorityRef.current.contains(e.target as Node)) setShowPriorityDropdown(false);
             if (assigneePickerRef.current && !assigneePickerRef.current.contains(e.target as Node)) setShowAssigneePicker(false);
-            if (collabPickerRef.current && !collabPickerRef.current.contains(e.target as Node)) setShowCollabPicker(false);
             if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) setShowMoreMenu(false);
             setSubtaskContextMenu(null);
             if (datePickerRef.current && !datePickerRef.current.contains(e.target as Node)) setShowDatePicker(false);
@@ -355,8 +355,6 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     const requester = users.find(u => u.id === task.requesterId);
     const assignedByUser = task.assignedById ? users.find(u => u.id === task.assignedById) : null;
 
-    const canManageCollaborators = true; // Anyone can add collaborators
-
     // Hours progress
     const estimated = task.estimatedHours || 0;
     const actual = task.actualHours || 0;
@@ -371,14 +369,6 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
         !allDepIds.has(t.id) &&
         t.title.toLowerCase().includes(depSearch.toLowerCase())
     ).slice(0, 8);
-
-    // Collaborator picker candidates. Somebody deactivated or deleted can still be seen on
-    // the work they did, but cannot be put on any more of it.
-    const filteredCollabCandidates = users.filter(u =>
-        !localCollaborators.some(c => c.id === u.id) &&
-        !isDormant(u) &&
-        u.name.toLowerCase().includes(collabSearch.toLowerCase())
-    ).slice(0, 10);
 
     // Assigning by hand is the fallback for work the round robin could not place, so it is
     // deliberately wider than the round robin: skill is the only requirement. Brand, region
@@ -398,10 +388,95 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
         .sort((a, b) => a.name.localeCompare(b.name));
     const assigneesAreSkillFiltered = skilledUsers.length > 0;
 
-    const handleStatusChange = (s: string) => {
+    const dependencyRow = (kind: 'blockedBy' | 'blocks' | 'linked', otherId: string) => {
+        if (kind === 'blocks') {
+            return { task_id: otherId, depends_on_task_id: task.id, type: 'blocked_by' };
+        }
+        return {
+            task_id: task.id,
+            depends_on_task_id: otherId,
+            type: kind === 'linked' ? 'linked' : 'blocked_by'
+        };
+    };
+
+    const persistDependency = async (kind: 'blockedBy' | 'blocks' | 'linked', otherId: string) => {
+        if (!SAVED_TASK_ID.test(task.id) || inTestSandbox()) return true;
+        const { error } = await supabase.from('task_dependencies').insert(dependencyRow(kind, otherId));
+        if (error && error.code !== '23505') {
+            toast.error(error.message || 'Could not save the task relationship.');
+            return false;
+        }
+        await refreshTasks();
+        return true;
+    };
+
+    const deleteDependency = async (kind: 'blockedBy' | 'blocks' | 'linked', otherId: string) => {
+        if (!SAVED_TASK_ID.test(task.id) || inTestSandbox()) return true;
+        const row = dependencyRow(kind, otherId);
+        let query = supabase
+            .from('task_dependencies')
+            .delete()
+            .eq('task_id', row.task_id)
+            .eq('depends_on_task_id', row.depends_on_task_id)
+            .eq('type', row.type);
+        const { error } = await query;
+        if (error) {
+            captureOperationalError('task_mutation', error, { operation: 'task_relationship' });
+            toast.error(error.message || 'Could not remove the task relationship.');
+            return false;
+        }
+
+        // Older linked rows may have been stored in the opposite direction.
+        if (kind === 'linked') {
+            const { error: reverseError } = await supabase
+                .from('task_dependencies')
+                .delete()
+                .eq('task_id', otherId)
+                .eq('depends_on_task_id', task.id)
+                .eq('type', 'linked');
+            if (reverseError) {
+                toast.error(reverseError.message || 'Could not remove the task relationship.');
+                return false;
+            }
+        }
+        await refreshTasks();
+        return true;
+    };
+
+    const updateTaskFields = async (values: Record<string, unknown>) => {
+        if (!SAVED_TASK_ID.test(task.id) || inTestSandbox()) return true;
+        const { error } = await supabase.from('tasks').update(values).eq('id', task.id);
+        if (error) {
+            captureOperationalError('task_mutation', error, { operation: 'safe_fields' });
+            toast.error(error.message || 'Could not save the task.');
+            return false;
+        }
+        await refreshTasks();
+        return true;
+    };
+
+    const handleStatusChange = async (s: string) => {
+        const previous = localStatus;
         setLocalStatus(s);
         setShowStatusDropdown(false);
-        if (onStatusChange) onStatusChange(task.id, s);
+        if (!SAVED_TASK_ID.test(task.id) || inTestSandbox()) {
+            task.status = s as Task['status'];
+            onStatusChange?.(task.id, s);
+            return;
+        }
+        const { error } = await supabase.rpc('set_task_status', {
+            p_task_id: task.id,
+            p_status: s,
+        });
+        if (error) {
+            captureOperationalError('task_mutation', error, { operation: 'status' });
+            toast.error(error.message || 'Could not change the task status.');
+            setLocalStatus(previous);
+            return;
+        }
+        task.status = s as Task['status'];
+        task.completedDate = s === 'completed' ? new Date().toISOString() : undefined;
+        onStatusChange?.(task.id, s);
     };
 
     // Picking someone used to change only this component's copy of the task, so the choice was
@@ -427,13 +502,17 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             return;
         }
 
-        const { error } = await supabase.rpc('assign_task', {
+        const activeAssignment = assignments.find(a => a.taskId === task.id && (a.status === 'pending' || a.status === 'accepted'));
+        const { error } = await supabase.rpc('assign_task_checked', {
             p_task_id: task.id,
             p_user_id: userId ?? null,
-            p_auto_accept: userId === currentUser.id
+            p_auto_accept: userId === currentUser.id,
+            p_expected_assignment_id: activeAssignment?.id || null,
+            p_expected_status: activeAssignment?.status || null,
         });
 
         if (error) {
+            captureOperationalError('assignment_conflict', error, { operation: 'assign' });
             // Put the picker back where it was; the task was not reassigned.
             setLocalAssignedToId(previous);
             task.assignedToId = previous;
@@ -453,7 +532,11 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     // Reloaded whenever the panel changes task, and again after an acceptance, which is the
     // one thing in here that adds to it.
     const loadActivity = React.useCallback(async () => {
-        if (!task?.id || !SAVED_TASK_ID.test(task.id) || inTestSandbox()) {
+        if (inTestSandbox()) {
+            setComments(contextComments.filter(comment => comment.taskId === task?.id));
+            return;
+        }
+        if (!task?.id || !SAVED_TASK_ID.test(task.id)) {
             setActivity([]);
             return;
         }
@@ -475,21 +558,50 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             detail: a.detail || {},
             createdDate: a.created_at
         })));
-    }, [task?.id]);
+    }, [task?.id, contextComments]);
 
     useEffect(() => { loadActivity(); }, [loadActivity]);
 
+    const loadComments = React.useCallback(async () => {
+        if (!task?.id || !SAVED_TASK_ID.test(task.id) || inTestSandbox()) {
+            setComments([]);
+            return;
+        }
+        const { data, error } = await supabase
+            .from('comments')
+            .select('id, task_id, user_id, content, is_internal, created_at')
+            .eq('task_id', task.id)
+            .order('created_at', { ascending: true });
+        if (error) {
+            toast.error('Could not load comments for this task.');
+            return;
+        }
+        setComments((data || []).map(row => ({
+            id: row.id,
+            taskId: row.task_id || '',
+            userId: row.user_id || '',
+            content: row.content,
+            createdDate: row.created_at || '',
+            isInternal: row.is_internal === true,
+        })));
+    }, [task?.id]);
+
+    useEffect(() => { void loadComments(); }, [loadComments]);
+
     const handleMarkComplete = () => {
         const next = localStatus === 'completed' ? 'in_progress' : 'completed';
-        handleStatusChange(next);
+        void handleStatusChange(next);
     };
 
-    const handleRemoveTag = (tagId: string) => {
+    const handleRemoveTag = async (tagId: string) => {
+        const previous = localTags;
         setLocalTags(prev => prev.filter(t => t.id !== tagId));
         if (task?.id && !task.id.startsWith('subtask-new')) {
-            supabase.from('task_tags').delete().eq('task_id', task.id).eq('tag_id', tagId).then(() => {
-                refreshTasks();
-            });
+            const { error } = await supabase.from('task_tags').delete().eq('task_id', task.id).eq('tag_id', tagId);
+            if (error) {
+                setLocalTags(previous);
+                toast.error(error.message || 'Could not remove the tag.');
+            } else await refreshTasks();
         }
     };
 
@@ -513,9 +625,11 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             }));
             
             const { data, error } = await supabase.from('tags').insert(insertData).select();
-            if (!error && data) {
-                createdTags = data;
+            if (error) {
+                toast.error(error.message || 'Could not create the tag.');
+                return;
             }
+            if (data) createdTags = data;
         }
         
         const tagsToAssign = [...existingTags, ...createdTags].filter(t => !localTags.some(lt => lt.id === t.id));
@@ -524,7 +638,11 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             setLocalTags([...localTags, ...tagsToAssign]);
             if (task?.id && !task.id.startsWith('subtask-new')) {
                 const taskTagsData = tagsToAssign.map(t => ({ task_id: task.id, tag_id: t.id }));
-                await supabase.from('task_tags').insert(taskTagsData);
+                const { error } = await supabase.from('task_tags').insert(taskTagsData);
+                if (error) {
+                    toast.error(error.message || 'Could not add the tag to this task.');
+                    return;
+                }
                 await refreshTasks();
             }
             await refreshTags();
@@ -534,19 +652,60 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
     };
 
     const updateChecklistInDB = async (newList: typeof localChecklist) => {
+        const previous = localChecklist;
         setLocalChecklist(newList);
-        if (task) {
-            await supabase.from('tasks').update({ checklist: newList }).eq('id', task.id);
-            refreshTasks();
+        if (!await updateTaskFields({ checklist: newList })) {
+            setLocalChecklist(previous);
         }
     };
 
     const updateSubtaskOrderInDB = async (newIds: string[]) => {
+        const previous = localSubtaskIds;
         setLocalSubtaskIds(newIds);
-        if (task) {
-            await supabase.from('tasks').update({ subtask_ids: newIds }).eq('id', task.id);
-            refreshTasks();
+        if (!SAVED_TASK_ID.test(task.id) || inTestSandbox()) return;
+        const { error } = await supabase.rpc('reorder_subtasks', {
+            p_parent_task_id: task.id,
+            p_ordered_ids: newIds,
+        });
+        if (error) {
+            captureOperationalError('task_mutation', error, { operation: 'reorder_subtasks' });
+            setLocalSubtaskIds(previous);
+            task.subtaskIds = previous;
+            toast.error(error.message || 'Could not save the subtask order.');
+        } else {
+            await refreshTasks();
         }
+    };
+
+    const saveInlineSubtaskFields = async (subtask: Task, values: Record<string, unknown>) => {
+        if (!SAVED_TASK_ID.test(subtask.id) || inTestSandbox()) return;
+        const { error } = await supabase.from('tasks').update(values).eq('id', subtask.id);
+        if (error) {
+            toast.error(error.message || 'Could not save the subtask.');
+            await refreshTasks();
+        }
+    };
+
+    const assignInlineSubtask = async (subtask: Task, userId?: string) => {
+        const previous = subtask.assignedToId;
+        subtask.assignedToId = userId;
+        setLocalLinked(current => [...current]);
+        if (!SAVED_TASK_ID.test(subtask.id) || inTestSandbox()) return;
+        const activeAssignment = assignments.find(a => a.taskId === subtask.id && (a.status === 'pending' || a.status === 'accepted'));
+        const { error } = await supabase.rpc('assign_task_checked', {
+            p_task_id: subtask.id,
+            p_user_id: userId || null,
+            p_auto_accept: userId === currentUser.id,
+            p_expected_assignment_id: activeAssignment?.id || null,
+            p_expected_status: activeAssignment?.status || null,
+        });
+        if (error) {
+            subtask.assignedToId = previous;
+            setLocalLinked(current => [...current]);
+            toast.error(error.message || 'Could not assign the subtask.');
+            return;
+        }
+        await Promise.all([refreshTasks(), refreshAssignments()]);
     };
 
     const handleCommentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -588,7 +747,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             : teams.filter(t => t.name.toLowerCase().includes(mentionState.query.toLowerCase())).slice(0, 5)
         : [];
 
-    const handleAddComment = (e: React.FormEvent) => {
+    const handleAddComment = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newComment.trim()) return;
         const comment: Comment = {
@@ -601,11 +760,22 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
         };
         setComments(prev => [...prev, comment]);
         setNewComment('');
+        if (SAVED_TASK_ID.test(task.id) && !inTestSandbox()) {
+            const { error } = await supabase.from('comments').insert({
+                task_id: task.id,
+                user_id: currentUser.id,
+                content: comment.content,
+                is_internal: comment.isInternal
+            });
+            if (error) {
+                setComments(prev => prev.filter(item => item.id !== comment.id));
+                toast.error('Could not save comment.');
+            } else await loadComments();
+        }
         setTimeout(() => commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     };
 
-    const handleAddSubtask = () => {
-        const blank: Task = {
+    const makeSubtaskDraft = (dueDate?: string): Task => ({
             id: `subtask-new-${Date.now()}`,
             requestId: '',
             title: '',
@@ -616,7 +786,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             priority: task.priority,
             status: 'new_request',
             estimatedHours: 0,
-            dueDate: localDueDate,
+            dueDate: dueDate || '',
             createdDate: new Date().toISOString(),
             teamIds: task.teamIds,
             requiredSkillIds: [],
@@ -626,50 +796,65 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
             tags: [],
             isSubtask: true,
             parentTaskId: task.id,
-        } as unknown as Task;
-        allTasks.push(blank);
-        if (task) {
-            const newIds = [...(task.subtaskIds || []), blank.id];
-            task.subtaskIds = newIds;
-            setLocalSubtaskIds(newIds);
+            sortOrder: localSubtaskIds.length,
+        } as unknown as Task);
+
+    const persistNewSubtask = async (openPanel: boolean, dueDate?: string) => {
+        const blank = makeSubtaskDraft(dueDate);
+        setDraftTasks(prev => [...prev, blank]);
+        const optimisticIds = [...localSubtaskIds, blank.id];
+        task.subtaskIds = optimisticIds;
+        setLocalSubtaskIds(optimisticIds);
+        if (openPanel) {
+            setStackedSubtask(blank);
+            setActiveSubtasksCount(1);
+            onNestedDepthChange?.(1);
+            handleActiveDepthChange(depth + 1);
         }
-        setStackedSubtask(blank);
-        setActiveSubtasksCount(1);
-        onNestedDepthChange?.(1);
-        handleActiveDepthChange(depth + 1);
+
+        if (inTestSandbox()) return;
+        const { data, error } = await supabase.rpc('create_subtask', {
+            p_parent_task_id: task.id,
+            p_title: '',
+        });
+        if (error || !data) {
+            captureOperationalError('task_mutation', error || new Error(), { operation: 'create_subtask' });
+            setDraftTasks(prev => prev.filter(item => item.id !== blank.id));
+            setLocalSubtaskIds(prev => prev.filter(id => id !== blank.id));
+            task.subtaskIds = task.subtaskIds.filter(id => id !== blank.id);
+            if (openPanel) setStackedSubtask(null);
+            toast.error(error?.message || 'Could not create the subtask.');
+            return;
+        }
+
+        const saved: Task = {
+            ...blank,
+            id: data.id,
+            title: blank.title || data.title,
+            description: blank.description || data.description || '',
+            status: data.status as Task['status'],
+            dueDate: data.due_date || '',
+            proposedStartDate: data.proposed_start_date || undefined,
+            proposedEndDate: data.proposed_end_date || undefined,
+            createdDate: data.created_at || new Date().toISOString(),
+            parentTaskId: data.parent_task_id || task.id,
+            sortOrder: data.sort_order,
+        };
+        setDraftTasks(prev => prev.map(item => item.id === blank.id ? saved : item));
+        setLocalSubtaskIds(prev => prev.map(id => id === blank.id ? saved.id : id));
+        task.subtaskIds = task.subtaskIds.map(id => id === blank.id ? saved.id : id);
+        if (openPanel) setStackedSubtask(current => current?.id === blank.id ? saved : current);
+        if (blank.title || blank.description) {
+            await supabase.from('tasks').update({
+                title: blank.title,
+                description: blank.description,
+            }).eq('id', saved.id);
+        }
+        await refreshTasks();
     };
 
-    const addNewSubtask = () => {
-        const blank = {
-            id: `subtask-new-${Date.now()}`,
-            requestId: '',
-            title: '',
-            description: '',
-            categoryId: task.categoryId,
-            clientId: task.clientId,
-            requesterId: currentUser.id,
-            priority: task.priority,
-            status: 'new_request',
-            estimatedHours: 0,
-            dueDate: undefined,
-            createdDate: new Date().toISOString(),
-            teamIds: task.teamIds,
-            requiredSkillIds: [],
-            subtaskIds: [],
-            dependencyIds: [],
-            linkedTaskIds: [task.id],
-            tags: [],
-            isSubtask: true,
-            parentTaskId: task.id,
-            assignedToId: undefined
-        } as unknown as Task;
-        allTasks.push(blank);
-        if (task) {
-            const newIds = [...(task.subtaskIds || []), blank.id];
-            task.subtaskIds = newIds;
-            setLocalSubtaskIds(newIds);
-        }
-    };
+    const handleAddSubtask = () => { void persistNewSubtask(true, localDueDate); };
+    const addNewSubtask = () => { void persistNewSubtask(false); };
 
     const renderTextWithMentions = (text: string, isInputOverlay = false) => {
         if (!text) return null;
@@ -719,7 +904,8 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                 ) : filteredDepCandidates.map(t => (
                     <button
                         key={t.id}
-                        onClick={() => {
+                        onClick={async () => {
+                            if (!await persistDependency(addingDepType, t.id)) return;
                             if (addingDepType === 'blockedBy') {
                                 setLocalBlockedBy(prev => [...prev, t.id]);
                                 t.blocksIds = [...(t.blocksIds || []), task.id];
@@ -886,7 +1072,19 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                         <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-gray-200 rounded-xl shadow-xl z-50 py-1 font-sans">
                                             {currentActiveDepth < 3 && (
                                                 <button onClick={() => {
-                                                    if (!task.subtaskIds?.length) addNewSubtask();
+                                                    if (!task.subtaskIds?.length) {
+                                                        addNewSubtask();
+                                                    } else {
+                                                        confirm('Delete all subtasks? This cannot be undone.', async () => {
+                                                            const { error } = await supabase.from('tasks').delete().in('id', task.subtaskIds || []);
+                                                            if (error) toast.error(error.message || 'Could not delete the subtasks.');
+                                                            else {
+                                                                setLocalSubtaskIds([]);
+                                                                task.subtaskIds = [];
+                                                                await refreshTasks();
+                                                            }
+                                                        });
+                                                    }
                                                     setShowMoreMenu(false);
                                                 }} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${task.subtaskIds?.length ? 'text-red-600 hover:bg-red-50' : 'text-gray-700 hover:bg-gray-50'}`}>
                                                     <SubtaskIcon className="w-4 h-4" /> {task.subtaskIds?.length ? 'Remove subtasks' : 'Add subtask'}
@@ -897,38 +1095,54 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                     if (!localChecklist?.length) {
                                                         setShowChecklistInput(true);
                                                     } else {
-                                                        setLocalChecklist([]);
+                                                        void updateChecklistInDB([]);
                                                     }
                                                     setShowMoreMenu(false);
                                                 }} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${localChecklist?.length ? 'text-red-600 hover:bg-red-50' : 'text-gray-700 hover:bg-gray-50'}`}>
                                                     <AddChecklistIcon className="w-4 h-4" /> {localChecklist?.length ? 'Remove checklist' : 'Add checklist'}
                                                 </button>
                                             )}
-                                            <button onClick={() => {
+                                            <button onClick={async () => {
                                                 if (!localTags?.length) {
                                                     setShowTagInput(true);
                                                 } else {
+                                                    const previous = localTags;
                                                     setLocalTags([]);
+                                                    const { error } = await supabase.from('task_tags').delete().eq('task_id', task.id);
+                                                    if (error) {
+                                                        setLocalTags(previous);
+                                                        toast.error(error.message || 'Could not remove the tags.');
+                                                    } else await refreshTasks();
                                                 }
                                                 setShowMoreMenu(false);
                                             }} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${localTags?.length ? 'text-red-600 hover:bg-red-50' : 'text-gray-700 hover:bg-gray-50'}`}>
                                                 <Tag className="w-4 h-4" /> {localTags?.length ? 'Remove tags' : 'Add tags'}
                                             </button>
-                                            <button onClick={() => {
+                                            <button onClick={async () => {
                                                 if (!localPriority) {
                                                     setShowPriorityInput(true);
                                                 } else {
+                                                    const previous = localPriority;
                                                     setLocalPriority(undefined);
+                                                    if (!await updateTaskFields({ priority: null })) setLocalPriority(previous);
+                                                    else task.priority = undefined;
                                                 }
                                                 setShowMoreMenu(false);
                                             }} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${localPriority ? 'text-red-600 hover:bg-red-50' : 'text-gray-700 hover:bg-gray-50'}`}>
                                                 <Flag className="w-4 h-4" /> {localPriority ? 'Remove priority' : 'Add priority'}
                                             </button>
-                                            <button onClick={() => {
+                                            <button onClick={async () => {
                                                 const hasDeps = localBlockedBy?.length || localBlocks?.length || localLinked?.length;
                                                 if (!hasDeps) {
                                                     setShowDepPopover(true);
                                                 } else {
+                                                    const removals = [
+                                                        ...localBlockedBy.map(id => deleteDependency('blockedBy', id)),
+                                                        ...localBlocks.map(id => deleteDependency('blocks', id)),
+                                                        ...localLinked.map(id => deleteDependency('linked', id))
+                                                    ];
+                                                    const removed = await Promise.all(removals);
+                                                    if (removed.some(ok => !ok)) return;
                                                     setLocalBlockedBy([]);
                                                     setLocalBlocks([]);
                                                     setLocalLinked([]);
@@ -938,18 +1152,22 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                 <LinkIcon className="w-4 h-4" /> {(localBlockedBy?.length || localBlocks?.length || localLinked?.length) ? 'Remove dependency' : 'Add dependency'}
                                             </button>
                                             <div className="h-px bg-gray-100 my-1" />
-                                            <button onClick={async () => {
-                                                setShowMoreMenu(false);
-                                                const newIsSubtask = !task.isSubtask;
-                                                const { error } = await supabase.from('tasks').update({ is_subtask: newIsSubtask, parent_task_id: null }).eq('id', task.id);
-                                                if (!error) {
-                                                    refreshTasks();
-                                                    onClose();
-                                                }
-                                            }} className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2">
-                                                <span className="w-4 h-4" /> {task.isSubtask ? 'Convert to task' : 'Convert to subtask'}
-                                            </button>
-                                            <div className="h-px bg-gray-100 my-1" />
+                                            {task.isSubtask && (
+                                                <>
+                                                    <button onClick={async () => {
+                                                        setShowMoreMenu(false);
+                                                        const { error } = await supabase.rpc('detach_subtask', { p_task_id: task.id });
+                                                        if (error) toast.error(error.message || 'Could not convert the subtask.');
+                                                        else {
+                                                            await refreshTasks();
+                                                            onClose();
+                                                        }
+                                                    }} className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2">
+                                                        <span className="w-4 h-4" /> Convert to task
+                                                    </button>
+                                                    <div className="h-px bg-gray-100 my-1" />
+                                                </>
+                                            )}
                                             {canDeleteTask && (
                                                 <button onClick={() => {
                                                     setShowMoreMenu(false);
@@ -1042,6 +1260,21 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                 <textarea
                                     value={title}
                                     onChange={e => setTitle(e.target.value)}
+                                    onBlur={async () => {
+                                        const next = title.trim();
+                                        if (!next) {
+                                            setTitle(task.title);
+                                            toast.error('A task title is required.');
+                                            return;
+                                        }
+                                        if (next === task.title) return;
+                                        if (await updateTaskFields({ title: next })) {
+                                            task.title = next;
+                                            setTitle(next);
+                                        } else {
+                                            setTitle(task.title);
+                                        }
+                                    }}
                                     className="w-full text-xl font-semibold text-gray-900 bg-transparent border-0 outline-none resize-none placeholder-gray-300 leading-tight"
                                     placeholder="Task title..."
                                     rows={1}
@@ -1052,76 +1285,20 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                     }}
                                 />
 
-                                {/* ── Collaborators ── */}
+                                {/* ── Participants ── */}
                                 <div>
-                                    <SectionLabel>Collaborators</SectionLabel>
+                                    <SectionLabel>Participants</SectionLabel>
                                     <div className="flex items-center gap-2 flex-wrap">
                                         {localCollaborators.map(u => (
-                                            <div key={u.id} title={u.name} className="relative group cursor-pointer">
+                                            <div key={u.id} title={u.name} className="relative">
                                                 <Avatar user={u} size="sm" />
-                                                {canManageCollaborators && (
-                                                    <button
-                                                        onClick={() => setLocalCollaborators(prev => prev.filter(c => c.id !== u.id))}
-                                                        className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full hidden group-hover:flex items-center justify-center shadow-sm transition-all"
-                                                        title={`Remove ${u.name}`}
-                                                    >
-                                                        <X className="w-2.5 h-2.5" />
-                                                    </button>
-                                                )}
                                             </div>
                                         ))}
                                         {localCollaborators.length === 0 && (
-                                            <span className="text-sm text-gray-400 italic">No collaborators</span>
-                                        )}
-
-                                        {/* Add collaborator picker */}
-                                        {canManageCollaborators && (
-                                            <div className="relative" ref={collabPickerRef}>
-                                                <button
-                                                    onClick={() => { setShowCollabPicker(v => !v); setCollabSearch(''); }}
-                                                    className="w-8 h-8 rounded-full border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors"
-                                                    title="Add collaborator"
-                                                >
-                                                    <Plus className="w-3.5 h-3.5" />
-                                                </button>
-                                                {showCollabPicker && (
-                                                    <div className="absolute top-full left-0 mt-1 w-64 bg-white rounded-xl shadow-lg border border-gray-200 z-50 overflow-hidden">
-                                                        <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100">
-                                                            <Search className="w-3.5 h-3.5 text-gray-400" />
-                                                            <input
-                                                                autoFocus
-                                                                value={collabSearch}
-                                                                onChange={e => setCollabSearch(e.target.value)}
-                                                                placeholder="Search people..."
-                                                                className="flex-1 text-sm outline-none placeholder-gray-400"
-                                                            />
-                                                        </div>
-                                                        <div className="max-h-48 overflow-y-auto py-1">
-                                                            {filteredCollabCandidates.length === 0 ? (
-                                                                <p className="text-sm text-gray-400 text-center py-4">No users found</p>
-                                                            ) : filteredCollabCandidates.map(u => (
-                                                                <button
-                                                                    key={u.id}
-                                                                    onClick={() => {
-                                                                        setLocalCollaborators(prev => [...prev, u]);
-                                                                        setCollabSearch('');
-                                                                        setShowCollabPicker(false);
-                                                                    }}
-                                                                    className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2.5 transition-colors"
-                                                                >
-                                                                    <Avatar user={u} size="xs" />
-                                                                    <div>
-                                                                        <div className="text-sm font-medium text-gray-800">{u.name}</div>
-                                                                        <div className="text-xs text-gray-400">{u.role.replace('_', ' ')}</div>
-                                                                    </div>
-                                                                </button>
-                                                            ))}
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
+                                            <span className="text-sm text-gray-400 italic">No participants</span>
                                         )}
                                     </div>
+                                    <p className="text-xs text-gray-400 mt-1">Participants derived from the requester, assignee, and responsible team.</p>
                                 </div>
 
                                 {/* ── Hours Progress Bar ── */}
@@ -1245,9 +1422,23 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                 <DateRangePicker
                                                     startDate={localStartDate}
                                                     dueDate={localDueDate}
-                                                    onChange={(start, due) => {
+                                                    onChange={async (start, due) => {
+                                                        const previousStart = localStartDate;
+                                                        const previousDue = localDueDate;
                                                         setLocalStartDate(start);
                                                         setLocalDueDate(due);
+                                                        if (!await updateTaskFields({
+                                                            proposed_start_date: start || null,
+                                                            proposed_end_date: due || null,
+                                                            due_date: due || null
+                                                        })) {
+                                                            setLocalStartDate(previousStart);
+                                                            setLocalDueDate(previousDue);
+                                                        } else {
+                                                            task.proposedStartDate = start || undefined;
+                                                            task.proposedEndDate = due || undefined;
+                                                            task.dueDate = due;
+                                                        }
                                                     }}
                                                     onClose={() => setShowDatePicker(false)}
                                                 />
@@ -1317,10 +1508,16 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                     .map((t: TagType) => (
                                                                         <button
                                                                             key={t.id}
-                                                                            onClick={() => {
+                                                                            onClick={async () => {
                                                                                 setLocalTags([...localTags, t]);
                                                                                 if (task?.id && !task.id.startsWith('subtask-new')) {
-                                                                                    supabase.from('task_tags').insert({ task_id: task.id, tag_id: t.id }).then(() => refreshTasks());
+                                                                                    const { error } = await supabase.from('task_tags').insert({ task_id: task.id, tag_id: t.id });
+                                                                                    if (error) {
+                                                                                        setLocalTags(localTags);
+                                                                                        toast.error(error.message || 'Could not add the tag.');
+                                                                                        return;
+                                                                                    }
+                                                                                    await refreshTasks();
                                                                                 }
                                                                                 setTagSearchQuery('');
                                                                                 setShowTagInput(false);
@@ -1380,7 +1577,9 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                         ].map(p => (
                                                             <button
                                                                 key={p.value}
-                                                                onClick={() => {
+                                                                onClick={async () => {
+                                                                    const previous = localPriority;
+                                                                    const nextPriority = p.value === 'clear' ? null : p.value;
                                                                     if (p.value === 'clear') {
                                                                         setLocalPriority(undefined);
                                                                         setShowPriorityInput(false);
@@ -1388,6 +1587,11 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                         setLocalPriority(p.value as Priority);
                                                                     }
                                                                     setShowPriorityDropdown(false);
+                                                                    if (!await updateTaskFields({ priority: nextPriority })) {
+                                                                        setLocalPriority(previous);
+                                                                    } else {
+                                                                        task.priority = (nextPriority || undefined) as Task['priority'];
+                                                                    }
                                                                 }}
                                                                 className={`w-full text-left px-4 py-2 text-sm flex items-center justify-between transition-colors hover:bg-gray-50 ${localPriority === p.value ? p.colorClass + ' font-medium' : 'text-gray-700'}`}
                                                             >
@@ -1494,7 +1698,8 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                         return (
                                                                             <div key={id} className="flex items-center justify-between text-[13px] text-gray-600 group py-1">
                                                                                 <span className="truncate flex-1">{t.title}</span>
-                                                                                <button onClick={() => {
+                                                                                <button onClick={async () => {
+                                                                                    if (!await deleteDependency('blockedBy', id)) return;
                                                                                     setLocalBlockedBy(prev => prev.filter(i => i !== id));
                                                                                     if (t.blocksIds) t.blocksIds = t.blocksIds.filter(i => i !== task.id);
                                                                                     if (task) task.blockedByIds = task.blockedByIds?.filter(i => i !== id);
@@ -1531,7 +1736,8 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                         return (
                                                                             <div key={id} className="flex items-center justify-between text-[13px] text-gray-600 group py-1">
                                                                                 <span className="truncate flex-1">{t.title}</span>
-                                                                                <button onClick={() => {
+                                                                                <button onClick={async () => {
+                                                                                    if (!await deleteDependency('blocks', id)) return;
                                                                                     setLocalBlocks(prev => prev.filter(i => i !== id));
                                                                                     if (t.blockedByIds) t.blockedByIds = t.blockedByIds.filter(i => i !== task.id);
                                                                                     if (task) task.blocksIds = task.blocksIds?.filter(i => i !== id);
@@ -1566,7 +1772,8 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                         return (
                                                                             <div key={id} className="flex items-center justify-between text-[13px] text-gray-600 group py-1">
                                                                                 <span className="truncate flex-1">{t.title}</span>
-                                                                                <button onClick={() => {
+                                                                                <button onClick={async () => {
+                                                                                    if (!await deleteDependency('linked', id)) return;
                                                                                     setLocalLinked(prev => prev.filter(i => i !== id));
                                                                                     if (t.linkedTaskIds) t.linkedTaskIds = t.linkedTaskIds.filter(i => i !== task.id);
                                                                                     if (task) task.linkedTaskIds = task.linkedTaskIds?.filter(i => i !== id);
@@ -1680,7 +1887,12 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                             autoFocus
                                             value={description}
                                             onChange={e => setDescription(e.target.value)}
-                                            onBlur={() => setIsEditingDescription(false)}
+                                            onBlur={async () => {
+                                                setIsEditingDescription(false);
+                                                if (description === (task.description || '')) return;
+                                                if (await updateTaskFields({ description })) task.description = description;
+                                                else setDescription(task.description || '');
+                                            }}
                                             className="w-full min-h-[100px] text-sm text-gray-700 bg-gray-50 border border-gray-100 rounded-lg p-3 outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 resize-y transition-all placeholder-gray-300"
                                             placeholder="Add a description..."
                                         />
@@ -1722,16 +1934,23 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                 )}
                                                 <span className="bg-gray-200/70 text-gray-600 text-xs px-2 py-0.5 rounded font-medium">0 / {localSubtaskIds.length}</span>
                                             </div>
-                                            <div className="flex items-center opacity-0 group-hover/header:opacity-100 transition-opacity">
+                                            <div className="flex items-center opacity-0 group-hover/header:opacity-100 group-focus-within/header:opacity-100 transition-opacity">
                                                 <div className="relative group/menu">
-                                                    <button className="p-1 hover:bg-gray-100 rounded text-gray-500 transition-colors">
+                                                    <button aria-label="Subtask actions" className="p-1 hover:bg-gray-100 rounded text-gray-500 transition-colors">
                                                         <MoreHorizontal className="w-4 h-4" />
                                                     </button>
-                                                    <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-xl shadow-xl z-[60] overflow-hidden font-sans opacity-0 invisible group-hover/menu:opacity-100 group-hover/menu:visible transition-all">
+                                                    <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-xl shadow-xl z-[60] overflow-hidden font-sans opacity-0 invisible group-hover/menu:opacity-100 group-hover/menu:visible group-focus-within/menu:opacity-100 group-focus-within/menu:visible transition-all">
                                                         <div className="py-1">
                                                             <button onClick={() => {
-                                                                setLocalSubtaskIds([]);
-                                                                task.subtaskIds = [];
+                                                                confirm('Delete all subtasks? This cannot be undone.', async () => {
+                                                                    const { error } = await supabase.from('tasks').delete().in('id', localSubtaskIds);
+                                                                    if (error) toast.error(error.message || 'Could not delete the subtasks.');
+                                                                    else {
+                                                                        setLocalSubtaskIds([]);
+                                                                        task.subtaskIds = [];
+                                                                        await refreshTasks();
+                                                                    }
+                                                                });
                                                             }} className="w-full text-left px-4 py-2 hover:bg-red-50 flex items-center gap-2 text-sm text-red-600">
                                                                 <Trash2 className="w-4 h-4" /> Delete subtasks
                                                             </button>
@@ -1828,6 +2047,8 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                     setLocalLinked([...localLinked]);
                                                                 }}
                                                                 onBlur={(e) => {
+                                                                    const nextTitle = e.currentTarget.value.trim();
+                                                                    void saveInlineSubtaskFields(sub, { title: nextTitle });
                                                                     setTimeout(() => {
                                                                         setLocalSubtaskIds(prev => {
                                                                             if (openSubtaskDatePickerId === sid) return prev;
@@ -1882,6 +2103,11 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                         }}
                                                                         onClose={() => {
                                                                             setOpenSubtaskDatePickerId(null);
+                                                                            void saveInlineSubtaskFields(sub, {
+                                                                                proposed_start_date: sub.proposedStartDate || null,
+                                                                                proposed_end_date: sub.proposedEndDate || null,
+                                                                                due_date: sub.dueDate || null,
+                                                                            });
                                                                             if (!sub.title.trim() && !sub.dueDate && !sub.assignedToId) {
                                                                                 setLocalSubtaskIds(prev => prev.filter(id => id !== sid));
                                                                                 if (task) task.subtaskIds = task.subtaskIds?.filter(id => id !== sid);
@@ -1908,7 +2134,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                         <button
                                                                             onClick={(e) => {
                                                                                 e.stopPropagation();
-                                                                                sub.assignedToId = undefined;
+                                                                                void assignInlineSubtask(sub, undefined);
                                                                                 if (!sub.title.trim() && !sub.dueDate) {
                                                                                     setLocalSubtaskIds(prev => prev.filter(id => id !== sid));
                                                                                     if (task) task.subtaskIds = task.subtaskIds?.filter(id => id !== sid);
@@ -1925,8 +2151,7 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                                                 key={u.id}
                                                                                 onClick={(e) => {
                                                                                     e.stopPropagation();
-                                                                                    sub.assignedToId = u.id;
-                                                                                    setLocalLinked([...localLinked]);
+                                                                                    void assignInlineSubtask(sub, u.id);
                                                                                 }}
                                                                                 className="w-full text-left px-2 py-1.5 hover:bg-gray-50 rounded flex items-center gap-2 text-sm text-gray-800"
                                                                             >
@@ -1982,12 +2207,12 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                                                     <div className="h-full bg-gray-800 rounded-full" style={{ width: `${localChecklist.length ? (localChecklist.filter(c => c.completed).length / localChecklist.length) * 100 : 0}%` }}></div>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center opacity-0 group-hover/header:opacity-100 transition-opacity">
+                                            <div className="flex items-center opacity-0 group-hover/header:opacity-100 group-focus-within/header:opacity-100 transition-opacity">
                                                 <div className="relative group/menu">
-                                                    <button className="p-1 hover:bg-gray-100 rounded text-gray-500 transition-colors">
+                                                    <button aria-label="Checklist actions" className="p-1 hover:bg-gray-100 rounded text-gray-500 transition-colors">
                                                         <MoreHorizontal className="w-4 h-4" />
                                                     </button>
-                                                    <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-xl shadow-xl z-[60] overflow-hidden font-sans opacity-0 invisible group-hover/menu:opacity-100 group-hover/menu:visible transition-all">
+                                                    <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-xl shadow-xl z-[60] overflow-hidden font-sans opacity-0 invisible group-hover/menu:opacity-100 group-hover/menu:visible group-focus-within/menu:opacity-100 group-focus-within/menu:visible transition-all">
                                                         <div className="py-1">
                                                             <button onClick={() => updateChecklistInDB([])} className="w-full text-left px-4 py-2 hover:bg-red-50 flex items-center gap-2 text-sm text-red-600">
                                                                 <Trash2 className="w-4 h-4" /> Delete checklist
@@ -2468,21 +2693,14 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                     >
                         {/* Duplicate */}
                         <button
-                            onMouseDown={(e) => {
+                            onMouseDown={async (e) => {
                                 e.stopPropagation();
                                 if (ctxSub) {
-                                    const dup: Task = {
-                                        ...ctxSub,
-                                        id: `subtask-dup-${Date.now()}`,
-                                        title: ctxSub.title + ' (copy)',
-                                        createdDate: new Date().toISOString(),
-                                    };
-                                    allTasks.push(dup);
-                                    const idx = localSubtaskIds.indexOf(subtaskContextMenu.sid);
-                                    const newIds = [...localSubtaskIds];
-                                    newIds.splice(idx + 1, 0, dup.id);
-                                    setLocalSubtaskIds(newIds);
-                                    task.subtaskIds = newIds;
+                                    const { error } = await supabase.rpc('duplicate_subtask', {
+                                        p_task_id: ctxSub.id,
+                                    });
+                                    if (error) toast.error(error.message || 'Could not duplicate the subtask.');
+                                    else await refreshTasks();
                                 }
                                 setSubtaskContextMenu(null);
                             }}
@@ -2495,9 +2713,17 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
                         <button
                             onMouseDown={(e) => {
                                 e.stopPropagation();
-                                const newIds = localSubtaskIds.filter(id => id !== subtaskContextMenu.sid);
-                                setLocalSubtaskIds(newIds);
-                                task.subtaskIds = newIds;
+                                const subtaskId = subtaskContextMenu.sid;
+                                confirm('Delete this subtask? This cannot be undone.', async () => {
+                                    const { error } = await supabase.from('tasks').delete().eq('id', subtaskId);
+                                    if (error) toast.error(error.message || 'Could not delete the subtask.');
+                                    else {
+                                        const newIds = localSubtaskIds.filter(id => id !== subtaskId);
+                                        setLocalSubtaskIds(newIds);
+                                        task.subtaskIds = newIds;
+                                        await refreshTasks();
+                                    }
+                                });
                                 setSubtaskContextMenu(null);
                             }}
                             className="w-full text-left px-4 py-2 hover:bg-red-50 flex items-center gap-2 text-sm text-red-600"
@@ -2522,3 +2748,5 @@ export default function TaskDetailsPanel({ task, isOpen, onClose, currentUser, o
         </>
     );
 }
+
+export default React.memo(TaskDetailsPanel);

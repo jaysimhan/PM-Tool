@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Calendar, Clock, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Assignment, Task } from '../types/types';
 import { supabase, inTestSandbox } from '../lib/supabaseClient';
 import { useData } from '../contexts/DataContext';
 import { SingleDatePicker } from './SingleDatePicker';
+import { useModalFocusTrap } from '../lib/useModalFocusTrap';
 
 /**
  * Confirming a piece of work before taking it on.
@@ -86,6 +87,8 @@ function DateField({
 }
 
 export default function AcceptTaskModal({ task, assignment, isOpen, onClose, onAccepted }: Props) {
+    const dialogRef = useRef<HTMLDivElement>(null);
+    useModalFocusTrap(isOpen, onClose, dialogRef);
     const { refreshTasks, refreshAssignments } = useData();
 
     const [deadline, setDeadline] = useState('');
@@ -165,10 +168,10 @@ export default function AcceptTaskModal({ task, assignment, isOpen, onClose, onA
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40">
-            <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="accept-task-title" tabIndex={-1} className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-lg max-h-[90vh] overflow-y-auto">
                 <div className="flex items-start justify-between p-5 border-b border-gray-100">
                     <div className="pr-4">
-                        <h2 className="text-lg font-semibold text-gray-900">Accept this task</h2>
+                        <h2 id="accept-task-title" className="text-lg font-semibold text-gray-900">Accept this task</h2>
                         <p className="text-sm text-gray-500 mt-0.5">{task.title}</p>
                     </div>
                     <button

@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { User } from '../types/types';
 import { X, Save, User as UserIcon, Award, Building2, Globe } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
 import { SkillPicker } from './SkillPicker';
 import { PreferenceMultiSelect } from './PreferenceMultiSelect';
+import { useModalFocusTrap } from '../lib/useModalFocusTrap';
 
 interface Props {
     isOpen: boolean;
@@ -21,6 +22,8 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
     const [regionIds, setRegionIds] = useState<string[]>(currentUser.regionIds || []);
     const [isSaving, setIsSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const dialogRef = useRef<HTMLDivElement>(null);
+    useModalFocusTrap(isOpen, onClose, dialogRef);
 
     useEffect(() => {
         if (isOpen) {
@@ -74,11 +77,12 @@ export function PreferencesModal({ isOpen, onClose, currentUser }: Props) {
 
     return (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
-            <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+            <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="preferences-title" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
                 <div className="p-4 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white z-10">
-                    <h2 className="text-lg font-semibold text-gray-900">Preferences</h2>
+                    <h2 id="preferences-title" className="text-lg font-semibold text-gray-900">Preferences</h2>
                     <button
                         onClick={onClose}
+                        aria-label="Close preferences"
                         className="p-1 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
                     >
                         <X className="w-5 h-5" />

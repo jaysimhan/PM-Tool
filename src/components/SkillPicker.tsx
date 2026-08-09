@@ -34,11 +34,21 @@ export function SkillPicker({ allSkills, selectedIds, onChange, placeholder = 'S
     const inputWrapperRef = useRef<HTMLDivElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
 
-    // Start downloading the embedding model up front so the first keystroke is not
-    // stuck behind a cold start.
-    useEffect(() => {
+    // The embedding model is ~516KB of JavaScript plus the model weights it then fetches, and
+    // this used to start downloading the moment the picker mounted. The picker is on the
+    // onboarding screen, the preferences modal and the request form, so simply arriving at any
+    // of those spent that bandwidth -- on every visit, for everyone, including the majority who
+    // never type a skill and the ones on a phone.
+    //
+    // It is still warmed ahead of the first keystroke, just not ahead of the first sign of
+    // interest. Focusing the box is early enough: the model loads while the person is still
+    // typing their first characters, and the search is debounced 300ms behind that anyway.
+    const warmedRef = useRef(false);
+    const warmOnIntent = () => {
+        if (warmedRef.current) return;
+        warmedRef.current = true;
         warmEmbeddingModel();
-    }, []);
+    };
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -167,7 +177,7 @@ export function SkillPicker({ allSkills, selectedIds, onChange, placeholder = 'S
                     type="text"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    onFocus={() => setShowSuggestions(true)}
+                    onFocus={() => { warmOnIntent(); setShowSuggestions(true); }}
                     placeholder={placeholder}
                     className="block w-full pl-9 pr-9 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm"
                 />
