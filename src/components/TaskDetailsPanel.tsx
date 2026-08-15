@@ -122,6 +122,103 @@ function SectionLabel({ children, icon }: { children: React.ReactNode, icon?: Re
     return <div className="text-[15px] font-semibold text-gray-900 mb-3 flex items-center gap-2">{icon && <span className="text-gray-400">{icon}</span>}{children}</div>;
 }
 
+/**
+ * One editable hours figure, used for both halves of the tracker.
+ *
+ * Click the number, type, Enter to save, Escape to put it back. Both sides are the same
+ * interaction and writing it twice by hand is how the two of them drift apart.
+ *
+ * null is a state of its own -- nobody has estimated this, nobody has logged against it --
+ * and is not the same as zero. Emptying the box returns to it, so a figure entered by
+ * mistake can be taken back rather than only overwritten with a number nobody chose.
+ */
+function HoursField({
+    value, render, emptyLabel, validate, onSave, title, tone
+}: {
+    value: number | null;
+    /** How the figure reads once set, e.g. `${n}h estimated`. */
+    render: (value: number) => string;
+    /** The prompt shown when nothing is recorded yet. */
+    emptyLabel: string;
+    /** An error message for a rejected number, or null to accept it. */
+    validate: (value: number) => string | null;
+    onSave: (next: number | null) => void;
+    title: string;
+    /** Classes for the figure once set. Unset always reads as the blue prompt to fill it in. */
+    tone?: string;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState('');
+    // Escape unmounts the input, and an unmount is not a blur React fires reliably, so the
+    // cancel has to be remembered rather than inferred from which handler ran.
+    const cancelled = useRef(false);
+
+    const commit = () => {
+        setEditing(false);
+        if (cancelled.current) {
+            cancelled.current = false;
+            return;
+        }
+        const raw = draft.trim();
+        const next = raw === '' ? null : Number(raw);
+        if (next !== null) {
+            if (!Number.isFinite(next)) {
+                toast.error('That is not a number of hours.');
+                return;
+            }
+            const problem = validate(next);
+            if (problem) {
+                toast.error(problem);
+                return;
+            }
+        }
+        if (next === value) return;
+        onSave(next);
+    };
+
+    if (editing) {
+        return (
+            <input
+                type="number"
+                min={0}
+                step={0.5}
+                autoFocus
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onBlur={commit}
+                onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        (e.target as HTMLInputElement).blur();
+                    } else if (e.key === 'Escape') {
+                        cancelled.current = true;
+                        setEditing(false);
+                    }
+                }}
+                placeholder="0.0"
+                aria-label={title}
+                className="w-24 px-2 py-0.5 text-sm text-right bg-white border border-blue-400 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+        );
+    }
+
+    return (
+        <button
+            onClick={() => {
+                cancelled.current = false;
+                setDraft(value !== null ? String(value) : '');
+                setEditing(true);
+            }}
+            title={title}
+            className={`text-sm rounded-md px-1.5 py-0.5 -mx-0.5 transition-colors hover:bg-blue-50 hover:text-blue-600 ${
+                value !== null ? tone ?? '' : 'text-blue-600 font-medium'
+            }`}
+        >
+            {value !== null ? render(value) : emptyLabel}
+        </button>
+    );
+}
+
 function FieldRow({ label, icon, children }: { label: React.ReactNode; icon?: React.ReactNode; children: React.ReactNode }) {
     return (
         <div className="flex items-start gap-3 px-4 py-2.5 border-b border-gray-100 last:border-0">
@@ -171,6 +268,12 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
     const datePickerRef = useRef<HTMLDivElement>(null);
     const [localStartDate, setLocalStartDate] = useState('');
     const [localDueDate, setLocalDueDate] = useState('');
+    // Both are nullable in the database, and null is a state of its own -- "nobody has
+    // estimated this", "nothing has been logged against it" -- rather than a figure of zero.
+    // A request submitted without an estimate arrives here as null, and showing that as 0h
+    // would read as a decision somebody made.
+    const [localEstimatedHours, setLocalEstimatedHours] = useState<number | null>(null);
+    const [localActualHours, setLocalActualHours] = useState<number | null>(null);
     const [stackedSubtask, setStackedSubtask] = useState<Task | null>(null);
     const [activeSubtasksCount, setActiveSubtasksCount] = useState(0);
     const [localChecklist, setLocalChecklist] = useState<{ id: string, text: string, completed: boolean, assigneeId?: string }[]>([]);
@@ -255,6 +358,8 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
             setLocalLinked(task.linkedTaskIds || task.dependencyIds || []);
             setLocalStartDate(task.proposedStartDate || '');
             setLocalDueDate(task.dueDate || task.proposedEndDate || '');
+            setLocalEstimatedHours(task.estimatedHours ?? null);
+            setLocalActualHours(task.actualHours ?? null);
             // Display only durable task relationships; this is a read-only participant list,
             // not an implied collaborator ACL.
             const initialCollabs = users.filter(u => {
@@ -338,6 +443,72 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
         return () => { cancelled = true; };
     }, [task?.id, task?.categoryId]);
 
+    // Reloaded whenever the panel changes task, and again after an acceptance, which is the
+    // one thing in here that adds to it.
+    //
+    // These four live above the `if (!task)` below rather than beside the code that reads
+    // them, and they have to: the panel is mounted permanently with task={null} and only
+    // fills in when somebody opens a task, so a hook sitting after that early return runs on
+    // the second render and not the first. React counts hooks per render, and the mismatch
+    // threw before anything could be shown -- which is what the details panel did for every
+    // task, new or existing, until this moved.
+    const loadActivity = React.useCallback(async () => {
+        if (inTestSandbox()) {
+            setComments(contextComments.filter(comment => comment.taskId === task?.id));
+            return;
+        }
+        if (!task?.id || !SAVED_TASK_ID.test(task.id)) {
+            setActivity([]);
+            return;
+        }
+        const { data, error } = await supabase
+            .from('task_activity')
+            .select('id, task_id, actor_id, type, detail, created_at')
+            .eq('task_id', task.id)
+            .order('created_at', { ascending: true });
+
+        if (error) {
+            console.error('Could not load the task history:', error);
+            return;
+        }
+        setActivity((data || []).map((a: any) => ({
+            id: a.id,
+            taskId: a.task_id,
+            actorId: a.actor_id || undefined,
+            type: a.type,
+            detail: a.detail || {},
+            createdDate: a.created_at
+        })));
+    }, [task?.id, contextComments]);
+
+    useEffect(() => { loadActivity(); }, [loadActivity]);
+
+    const loadComments = React.useCallback(async () => {
+        if (!task?.id || !SAVED_TASK_ID.test(task.id) || inTestSandbox()) {
+            setComments([]);
+            return;
+        }
+        const { data, error } = await supabase
+            .from('comments')
+            .select('id, task_id, user_id, content, is_internal, created_at')
+            .eq('task_id', task.id)
+            .order('created_at', { ascending: true });
+        if (error) {
+            toast.error('Could not load comments for this task.');
+            return;
+        }
+        setComments((data || []).map(row => ({
+            id: row.id,
+            taskId: row.task_id || '',
+            userId: row.user_id || '',
+            content: row.content,
+            createdDate: row.created_at || '',
+            isInternal: row.is_internal === true,
+        })));
+    }, [task?.id]);
+
+    useEffect(() => { void loadComments(); }, [loadComments]);
+
     if (!task) return null;
 
     const assignedUser = localAssignedToId ? users.find(u => u.id === localAssignedToId) : null;
@@ -356,10 +527,13 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
     const assignedByUser = task.assignedById ? users.find(u => u.id === task.assignedById) : null;
 
     // Hours progress
-    const estimated = task.estimatedHours || 0;
-    const actual = task.actualHours || 0;
-    const hoursPercent = estimated > 0 ? Math.min(100, (actual / estimated) * 100) : 0;
-    const isOverBudget = actual > estimated;
+    const estimated = localEstimatedHours ?? 0;
+    const actual = localActualHours ?? 0;
+    const hasEstimate = localEstimatedHours !== null && localEstimatedHours > 0;
+    const hoursPercent = hasEstimate ? Math.min(100, (actual / estimated) * 100) : 0;
+    // Only meaningful against a figure somebody actually set. Without one, every task with
+    // any time logged would read as over budget against an estimate of nothing.
+    const isOverBudget = hasEstimate && actual > estimated;
 
     // Dependencies
     const totalDeps = localBlockedBy.length + localBlocks.length + localLinked.length;
@@ -455,6 +629,42 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
         return true;
     };
 
+    /**
+     * The two hours figures, once the task exists.
+     *
+     * The estimate could only be set twice in a task's life -- on the request form, and again
+     * by whoever accepted the work -- and nowhere in between, so a task that arrived without
+     * one, or whose scope changed after it was accepted, carried the wrong number for good.
+     * Every hours total on the workload and capacity pages is a sum of these, so a stale one
+     * is not a cosmetic problem.
+     *
+     * The actual side had it worse: the tracker has always drawn a bar of time spent against
+     * time allowed, and nothing anywhere in the application ever wrote actual_hours, so the
+     * spent half was zero on every task in the system and the bar measured nothing.
+     *
+     * Both columns are ones the browser is granted directly, and RLS answers who may write
+     * them (can_edit_task: an admin, the requester, the assignee, or the team's leader), so
+     * these are plain updates rather than further workflow functions.
+     */
+    const saveHours = async (
+        column: 'estimated_hours' | 'actual_hours',
+        next: number | null,
+        current: number | null,
+        apply: (value: number | null) => void,
+    ) => {
+        apply(next);
+        // The panel holds its own copy of the task -- refreshTasks() replaces the rows behind
+        // it, not this object -- so the figure the rest of the panel reads is set here too.
+        if (column === 'estimated_hours') task.estimatedHours = next as Task['estimatedHours'];
+        else task.actualHours = next ?? undefined;
+
+        if (!await updateTaskFields({ [column]: next })) {
+            apply(current);
+            if (column === 'estimated_hours') task.estimatedHours = current as Task['estimatedHours'];
+            else task.actualHours = current ?? undefined;
+        }
+    };
+
     const handleStatusChange = async (s: string) => {
         const previous = localStatus;
         setLocalStatus(s);
@@ -528,65 +738,6 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
         refreshTasks();
         refreshAssignments();
     };
-
-    // Reloaded whenever the panel changes task, and again after an acceptance, which is the
-    // one thing in here that adds to it.
-    const loadActivity = React.useCallback(async () => {
-        if (inTestSandbox()) {
-            setComments(contextComments.filter(comment => comment.taskId === task?.id));
-            return;
-        }
-        if (!task?.id || !SAVED_TASK_ID.test(task.id)) {
-            setActivity([]);
-            return;
-        }
-        const { data, error } = await supabase
-            .from('task_activity')
-            .select('id, task_id, actor_id, type, detail, created_at')
-            .eq('task_id', task.id)
-            .order('created_at', { ascending: true });
-
-        if (error) {
-            console.error('Could not load the task history:', error);
-            return;
-        }
-        setActivity((data || []).map((a: any) => ({
-            id: a.id,
-            taskId: a.task_id,
-            actorId: a.actor_id || undefined,
-            type: a.type,
-            detail: a.detail || {},
-            createdDate: a.created_at
-        })));
-    }, [task?.id, contextComments]);
-
-    useEffect(() => { loadActivity(); }, [loadActivity]);
-
-    const loadComments = React.useCallback(async () => {
-        if (!task?.id || !SAVED_TASK_ID.test(task.id) || inTestSandbox()) {
-            setComments([]);
-            return;
-        }
-        const { data, error } = await supabase
-            .from('comments')
-            .select('id, task_id, user_id, content, is_internal, created_at')
-            .eq('task_id', task.id)
-            .order('created_at', { ascending: true });
-        if (error) {
-            toast.error('Could not load comments for this task.');
-            return;
-        }
-        setComments((data || []).map(row => ({
-            id: row.id,
-            taskId: row.task_id || '',
-            userId: row.user_id || '',
-            content: row.content,
-            createdDate: row.created_at || '',
-            isInternal: row.is_internal === true,
-        })));
-    }, [task?.id]);
-
-    useEffect(() => { void loadComments(); }, [loadComments]);
 
     const handleMarkComplete = () => {
         const next = localStatus === 'completed' ? 'in_progress' : 'completed';
@@ -1308,11 +1459,26 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
                                             <Clock className="w-4 h-4 text-gray-400" />
                                             <span className="text-sm font-medium text-gray-700">Hours Tracker</span>
                                         </div>
-                                        <div className="text-right">
-                                            <span className={`text-sm font-semibold ${isOverBudget ? 'text-red-600' : 'text-gray-900'}`}>
-                                                {actual}h
-                                            </span>
-                                            <span className="text-sm text-gray-400"> / {estimated}h estimated</span>
+                                        <div className="flex items-center gap-1">
+                                            <HoursField
+                                                value={localActualHours}
+                                                render={n => `${n}h`}
+                                                emptyLabel="Log time"
+                                                validate={n => (n < 0 ? 'Hours logged cannot be negative.' : null)}
+                                                title="Hours spent on this task so far"
+                                                tone={`font-semibold ${isOverBudget ? 'text-red-600' : 'text-gray-900'}`}
+                                                onSave={next => void saveHours('actual_hours', next, localActualHours, setLocalActualHours)}
+                                            />
+                                            <span className="text-sm text-gray-400">/</span>
+                                            <HoursField
+                                                value={localEstimatedHours}
+                                                render={n => `${n}h estimated`}
+                                                emptyLabel="Add an estimate"
+                                                validate={n => (n <= 0 ? 'Estimated hours must be greater than zero.' : null)}
+                                                title="Hours this task is expected to take"
+                                                tone="text-gray-400"
+                                                onSave={next => void saveHours('estimated_hours', next, localEstimatedHours, setLocalEstimatedHours)}
+                                            />
                                         </div>
                                     </div>
                                     <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
@@ -1322,13 +1488,26 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
                                         />
                                     </div>
                                     <div className="flex justify-between mt-1.5">
-                                        <span className="text-xs text-gray-400">{hoursPercent.toFixed(0)}% used</span>
-                                        {isOverBudget ? (
-                                            <span className="text-xs text-red-500 flex items-center gap-1">
-                                                <AlertCircle className="w-3 h-3" /> Over budget by {(actual - estimated).toFixed(1)}h
+                                        {/* Percentages and a remaining figure are both division by the
+                                            estimate. With none set they read as 0% used and 0.0h left,
+                                            which says the work is fully spent rather than unmeasured. */}
+                                        {!hasEstimate ? (
+                                            <span className="text-xs text-gray-400">
+                                                {actual > 0
+                                                    ? `${actual}h logged, against no estimate`
+                                                    : 'No estimate set'}
                                             </span>
                                         ) : (
-                                            <span className="text-xs text-gray-400">{(estimated - actual).toFixed(1)}h remaining</span>
+                                            <>
+                                                <span className="text-xs text-gray-400">{hoursPercent.toFixed(0)}% used</span>
+                                                {isOverBudget ? (
+                                                    <span className="text-xs text-red-500 flex items-center gap-1">
+                                                        <AlertCircle className="w-3 h-3" /> Over budget by {(actual - estimated).toFixed(1)}h
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-xs text-gray-400">{(estimated - actual).toFixed(1)}h remaining</span>
+                                                )}
+                                            </>
                                         )}
                                     </div>
                                 </div>

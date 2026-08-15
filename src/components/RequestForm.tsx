@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { User } from '../types/types';
 import { FileText, Send, X, Link as LinkIcon, Settings, Copy, Eye, Calendar, Search, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
@@ -69,6 +70,13 @@ export default function RequestForm({ currentUser }: Props) {
     const [formData, setFormData] = useState(emptyForm);
     const [customValues, setCustomValues] = useState<Record<string, CustomFieldValue>>({});
 
+    // ?due=yyyy-MM-dd, set by the Tasks calendar when a new task is started from a day cell.
+    // Validated rather than trusted: it lands in a date field the picker expects to be able
+    // to parse, and anything else is dropped in favour of no deadline at all.
+    const [searchParams] = useSearchParams();
+    const dueParam = searchParams.get('due') || '';
+    const presetDueDate = /^\d{4}-\d{2}-\d{2}$/.test(dueParam) ? dueParam : '';
+
     const [showSuccess, setShowSuccess] = useState(false);
     const [lastRequestRef, setLastRequestRef] = useState<string | null>(null);
     const [showShareModal, setShowShareModal] = useState(false);
@@ -122,7 +130,11 @@ export default function RequestForm({ currentUser }: Props) {
     useEffect(() => {
         if (configLoading || defaultsApplied.current) return;
         defaultsApplied.current = true;
-        setFormData(blankForm());
+        // Arriving from a day on the Tasks calendar carries that day over as the deadline, so
+        // the click is not thrown away on the way here. Only on the way in: blankForm() is
+        // also the post-submit reset, and the second request of a session has nothing to do
+        // with the day that opened the first.
+        setFormData({ ...blankForm(), ...(presetDueDate ? { dueDate: presetDueDate } : {}) });
     }, [configLoading, core]);
 
     // Seed defaults for newly visible custom fields and drop answers to fields that are no

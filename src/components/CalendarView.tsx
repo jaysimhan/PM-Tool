@@ -8,6 +8,7 @@ import TaskDetailsPanel from './TaskDetailsPanel';
 import TimelineView from './TimelineView';
 import { TimelineContainer } from './TimelineContainer';
 import { useTestEnvironment } from '../lib/testEnvironment';
+import { useAppNavigate } from '../lib/appNav';
 import { useMemberFilter } from '../contexts/MemberViewContext';
 import { getTagStyle } from '../utils/colors';
 import { useVirtualWindow } from '../lib/useVirtualWindow';
@@ -45,6 +46,11 @@ const FACET_PARAMS = ['assignee', 'brand', 'region', 'tag', 'skill'] as const;
 const isPendingAcceptance = (task: Task) => task.status === 'awaiting_employee_approval';
 const pendingClass = (task: Task) => (isPendingAcceptance(task) ? ' task-pending' : '');
 
+// estimated_hours is nullable, and a request submitted without one is not a task somebody
+// estimated at zero. Interpolated raw it printed a bare "h" on every card and a "0 / h" in
+// the list, which reads as a broken row rather than as a figure nobody has given yet.
+const estimateLabel = (hours?: number | null) => (hours === null || hours === undefined ? '—' : `${hours}h`);
+
 export default function CalendarView({ currentUser }: Props) {
   const { users, teams, tasks, clients, regions, allTags, skills, workCategories, loading } = useData();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -69,40 +75,19 @@ export default function CalendarView({ currentUser }: Props) {
   const [viewMode, setViewMode] = useState<CalendarView>('month');
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
 
-  // A blank task for the details panel to open on. Whatever the click already implies — the
-  // day cell in the calendar, the column on the board — is passed in so the panel opens with
-  // it filled instead of making someone re-enter what they just clicked.
-  const handleNewTask = (overrides: Partial<Task> = {}) => {
-    const blankTask: Task = {
-      id: `new-${Date.now()}`,
-      requestId: '',
-      title: '',
-      description: '',
-      categoryId: '',
-      clientId: '',
-      requesterId: currentUser.id,
-      priority: 'normal',
-      status: 'new_request',
-      estimatedHours: 0,
-      dueDate: '',
-      createdDate: new Date().toISOString(),
-      teamIds: [],
-      requiredSkillIds: [],
-      subtaskIds: [],
-      dependencyIds: [],
-      linkedTaskIds: [],
-      tags: [],
-      isSubtask: false,
-      ...overrides
-    };
-    setSelectedTask(blankTask);
-    setIsTaskPanelOpen(true);
-  };
+  // New Task goes to the request form, which is the only thing in the app that creates one.
+  //
+  // It used to hand the details panel a blank task carrying a `new-<timestamp>` id and let
+  // somebody fill it in there, but the panel writes every field with an UPDATE against an
+  // existing row and skips the write entirely when the id is not a real one -- so everything
+  // typed into that draft was dropped silently, and the task never existed. Composing in the
+  // panel cannot work without a create step, and there already is one.
+  const goTo = useAppNavigate();
+  const handleNewTask = () => goTo('/new-request');
 
-  const handleNewTaskOnDate = (day: Date) => {
-    const date = toDateKey(day);
-    handleNewTask({ proposedStartDate: date, proposedEndDate: date, dueDate: date });
-  };
+  // Whatever the click already implies -- the day cell in the calendar -- is carried across,
+  // so the form opens on the deadline that was just clicked rather than asking for it again.
+  const handleNewTaskOnDate = (day: Date) => goTo(`/new-request?due=${toDateKey(day)}`);
 
   const toggleTaskExpansion = (taskId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -136,13 +121,16 @@ export default function CalendarView({ currentUser }: Props) {
     return teams.filter(t => t.memberIds.includes(currentUser.id));
   }, [currentUser]);
 
-  // Filter tasks
+  // Everything the filters allow, finished work included.
+  //
+  // Completed and cancelled tasks used to be dropped right here, before any filter ran, and
+  // three things downstream asked for them anyway: the board's Completed column, the
+  // Completed Tasks KPI, and the Completed and Cancelled pills in the status filter. All
+  // three were answered with an empty set no matter what was in the database. Which views
+  // hide finished work is a decision each of them makes below, where it can be seen.
   const filteredTasks = useMemo(() => {
     const visibleTeamIds = visibleTeams.map(t => t.id);
-    let filtered = tasks.filter(t => 
-      t.status !== 'completed' && 
-      t.status !== 'cancelled'
-    );
+    let filtered = tasks.slice();
 
     if (filterTeam !== 'all') {
       filtered = filtered.filter(t => t.teamIds && t.teamIds.includes(filterTeam));
@@ -211,6 +199,15 @@ export default function CalendarView({ currentUser }: Props) {
 
     return filtered;
   }, [filterTeam, filterPriority, filterStatus, filterBrand, filterRegion, filterTag, filterAssignee, filterSkill, pageMode, sortBy, sortDirection, tasks, visibleTeams, users, currentUser]);
+
+  // The live slice: what is still to be done. The calendar and the list are about the work in
+  // front of people, so finished tasks stay out of them -- unless they have been asked for by
+  // name in the status filter, which is the one way to go back and look at them.
+  const activeTasks = useMemo(() => {
+    const wantsFinished = filterStatus.includes('completed') || filterStatus.includes('cancelled');
+    if (wantsFinished) return filteredTasks;
+    return filteredTasks.filter(t => t.status !== 'completed' && t.status !== 'cancelled');
+  }, [filteredTasks, filterStatus]);
 
   const handleTaskClick = (task: Task) => {
     setSelectedTask(task);
@@ -352,7 +349,7 @@ export default function CalendarView({ currentUser }: Props) {
   // Get tasks for a specific date
   const getTasksForDate = (date: Date) => {
     const dateStr = toDateKey(date);
-    return filteredTasks.filter(task => {
+    return activeTasks.filter(task => {
       if (!task.proposedStartDate || !task.dueDate) return false;
       const startDate = taskDateKey(task.proposedStartDate);
       const endDate = taskDateKey(task.dueDate);
@@ -416,14 +413,16 @@ export default function CalendarView({ currentUser }: Props) {
             const isToday = day.toDateString() === new Date().toDateString();
             const dayTasks = getTasksForDate(day);
 
+            // The whole cell used to be the click target for a new task. That was survivable
+            // when it opened a dismissible panel beside the calendar; now that it leaves the
+            // page for the request form, a mis-click costs you the month you were reading.
+            // The + is the button -- it is what the hover was advertising all along.
             return (
               <div
                 key={index}
-                onClick={() => handleNewTaskOnDate(day)}
-                title={`New task on ${day.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`}
-                className={`group min-h-[120px] border-r border-b border-gray-200 p-2 cursor-pointer ${
+                className={`group min-h-[120px] border-r border-b border-gray-200 p-2 ${
                   !isCurrentMonth ? 'bg-gray-50' : 'bg-white'
-                } hover:bg-blue-50 transition-colors`}
+                } hover:bg-blue-50/60 transition-colors`}
               >
                 <div className="flex items-start justify-between mb-2">
                   <div className={`text-sm font-medium ${
@@ -435,7 +434,14 @@ export default function CalendarView({ currentUser }: Props) {
                   }`}>
                     {day.getDate()}
                   </div>
-                  <Plus className="w-4 h-4 text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <button
+                    onClick={() => handleNewTaskOnDate(day)}
+                    title={`New task on ${day.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`}
+                    aria-label={`New task on ${day.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`}
+                    className="p-0.5 rounded text-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-blue-100 transition-opacity"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
                 </div>
 
                 <div className="space-y-1">
@@ -446,7 +452,7 @@ export default function CalendarView({ currentUser }: Props) {
                     return (
                       <div
                         key={task.id}
-                        onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
+                        onClick={() => handleTaskClick(task)}
                         title={isPendingAcceptance(task) ? `${task.title} — waiting to be accepted` : task.title}
                         className={`text-xs p-1.5 rounded cursor-pointer hover:shadow-sm transition-shadow border border-transparent${pendingClass(task)}`}
                         style={{
@@ -469,8 +475,8 @@ export default function CalendarView({ currentUser }: Props) {
                   })}
                   {dayTasks.length > 3 && (
                     <div
-                      onClick={e => { e.stopPropagation(); setViewMode('day'); setCurrentDate(day); }}
-                      className="text-[10px] text-gray-500 text-center hover:text-blue-600"
+                      onClick={() => { setViewMode('day'); setCurrentDate(day); }}
+                      className="text-[10px] text-gray-500 text-center cursor-pointer hover:text-blue-600"
                     >
                       +{dayTasks.length - 3} more
                     </div>
@@ -516,9 +522,7 @@ export default function CalendarView({ currentUser }: Props) {
             return (
               <div
                 key={index}
-                onClick={() => handleNewTaskOnDate(day)}
-                title={`New task on ${day.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`}
-                className="group min-h-[400px] border-r border-gray-200 last:border-r-0 p-3 cursor-pointer hover:bg-blue-50/40 transition-colors"
+                className="group min-h-[400px] border-r border-gray-200 last:border-r-0 p-3 hover:bg-blue-50/30 transition-colors"
               >
                 <div className="space-y-2">
                   {dayTasks.map(task => {
@@ -528,7 +532,7 @@ export default function CalendarView({ currentUser }: Props) {
                     return (
                       <div
                         key={task.id}
-                        onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
+                        onClick={() => handleTaskClick(task)}
                         title={isPendingAcceptance(task) ? `${task.title} — waiting to be accepted` : task.title}
                         className={`text-xs p-2 rounded cursor-pointer hover:shadow-md transition-shadow border border-transparent${pendingClass(task)}`}
                         style={{
@@ -538,7 +542,7 @@ export default function CalendarView({ currentUser }: Props) {
                       >
                         <div className="font-medium mb-1">{task.title}</div>
                         <div className="text-[10px] text-gray-600">
-                          {task.estimatedHours}h • {assignedUser?.name.split(' ')[0]}
+                          {estimateLabel(task.estimatedHours)} • {assignedUser?.name.split(' ')[0]}
                         </div>
                         <div className={`text-[10px] px-1.5 py-0.5 rounded inline-block mt-1 ${getStatusBadgeColor(task.status)}`}>
                           {formatStatusLabel(task.status)}
@@ -547,10 +551,16 @@ export default function CalendarView({ currentUser }: Props) {
                     );
                   })}
 
-                  <div className="flex items-center gap-1 text-xs text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity px-1">
+                  {/* The label was decoration over a click target covering the whole column.
+                      Now it is the control, so it has to be one you can actually press. */}
+                  <button
+                    onClick={() => handleNewTaskOnDate(day)}
+                    title={`New task on ${day.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`}
+                    className="w-full flex items-center gap-1 text-xs text-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity px-1 py-1 rounded hover:bg-blue-100/60"
+                  >
                     <Plus className="w-3.5 h-3.5" />
                     New task
-                  </div>
+                  </button>
                 </div>
               </div>
             );
@@ -593,13 +603,15 @@ export default function CalendarView({ currentUser }: Props) {
 
         <div className="p-6 space-y-3">
           {dayTasks.length === 0 ? (
-            <div
+            // An empty day is the one place where the whole area is safe to make the target:
+            // there is nothing else in it to mis-click, and it says what it does.
+            <button
               onClick={() => handleNewTaskOnDate(currentDate)}
-              className="text-center py-12 rounded-lg border border-dashed border-gray-200 cursor-pointer hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
+              className="w-full text-center py-12 rounded-lg border border-dashed border-gray-200 hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
             >
               <div className="text-gray-400 text-lg mb-2">No tasks scheduled</div>
-              <div className="text-sm text-gray-500">Click to add a task to this day</div>
-            </div>
+              <div className="text-sm text-gray-500">Add a task to this day</div>
+            </button>
           ) : (
             dayTasks.map(task => {
               const assignedUser = task.assignedToId ? users.find(u => u.id === task.assignedToId) : null;
@@ -633,7 +645,7 @@ export default function CalendarView({ currentUser }: Props) {
                         <span>•</span>
                         <span>{category?.name}</span>
                         <span>•</span>
-                        <span>{task.estimatedHours}h</span>
+                        <span>{estimateLabel(task.estimatedHours)}</span>
                       </div>
                     </div>
                     
@@ -670,7 +682,6 @@ export default function CalendarView({ currentUser }: Props) {
   };
 
 
-  const activeTasks = filteredTasks;
   const topLevelListTasks = useMemo(() => activeTasks.filter(t => !t.isSubtask), [activeTasks]);
   const listWindow = useVirtualWindow(topLevelListTasks.length, 54, 600, 8);
 
@@ -776,8 +787,11 @@ export default function CalendarView({ currentUser }: Props) {
                   </span>
               </td>
               
-              <td className="px-4 py-3 text-xs text-gray-600">
-                  {task.actualHours || 0} / {task.estimatedHours}h
+              <td
+                  className="px-4 py-3 text-xs text-gray-600"
+                  title={task.estimatedHours == null ? 'No estimate set' : 'Hours logged against the estimate'}
+              >
+                  {task.actualHours || 0} / {estimateLabel(task.estimatedHours)}
               </td>
           </tr>
       );
@@ -852,9 +866,16 @@ export default function CalendarView({ currentUser }: Props) {
 
   const renderBoardView = () => {
       // 'pending' is a legacy status no task carries any more, so the column it used to fill
-      // stood permanently empty — and a click-to-add on it would have created a task the
-      // column could never show. 'awaiting_assignment' is what "pending" means now.
+      // stood permanently empty. 'awaiting_assignment' is what "pending" means now.
+      //
+      // 'new_request' leads because it is where every task starts: the tasks insert trigger
+      // sets that status and will not take another value, so without a column for it a task
+      // created from this very board dropped straight off the board it was created on.
+      //
+      // The + on a column is therefore a shortcut to the request form rather than a way to
+      // file work into that column -- where a task goes next is the workflow's answer.
       const statusColumns: { status: TaskStatus; label: string; color: string }[] = [
+          { status: 'new_request', label: 'New', color: 'bg-slate-100' },
           { status: 'scheduled', label: 'Scheduled', color: 'bg-purple-100' },
           { status: 'awaiting_assignment', label: 'Pending', color: 'bg-gray-100' },
           { status: 'awaiting_employee_approval', label: 'Awaiting Approval', color: 'bg-yellow-100' },
@@ -867,7 +888,10 @@ export default function CalendarView({ currentUser }: Props) {
           <div className="bg-white rounded-lg border border-gray-200 p-6 overflow-x-auto">
               <div className="flex gap-4 min-w-max">
                   {statusColumns.map(column => {
-                      const columnTasks = activeTasks.filter(t => t.status === column.status);
+                      // filteredTasks, not the live slice: the board names the status of every
+                      // column it draws, so hiding finished work from it would empty the one
+                      // column that exists to show it.
+                      const columnTasks = filteredTasks.filter(t => t.status === column.status);
 
                       return (
                           <div key={column.status} className="group space-y-3 w-72 flex-shrink-0">
@@ -876,19 +900,17 @@ export default function CalendarView({ currentUser }: Props) {
                                   <div className="flex items-center gap-1.5">
                                       <span className="text-xs text-gray-500">{columnTasks.length}</span>
                                       <button
-                                          onClick={() => handleNewTask({ status: column.status })}
-                                          title={`New task in ${column.label}`}
-                                          className="p-0.5 rounded text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-gray-100 hover:text-blue-600 transition-all"
+                                          onClick={handleNewTask}
+                                          title="New task"
+                                          aria-label="New task"
+                                          className="p-0.5 rounded text-gray-400 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-gray-100 hover:text-blue-600 transition-all"
                                       >
                                           <Plus className="w-4 h-4" />
                                       </button>
                                   </div>
                               </div>
 
-                              <div
-                                  onClick={() => handleNewTask({ status: column.status })}
-                                  className="space-y-2 min-h-[400px] cursor-pointer"
-                              >
+                              <div className="space-y-2 min-h-[400px]">
                                   {columnTasks.map(task => {
                                       const assignedUser = task.assignedToId ? users.find(u => u.id === task.assignedToId) : null;
                                       const userTeam = assignedUser ? getUserTeam(assignedUser.id) : null;
@@ -896,7 +918,7 @@ export default function CalendarView({ currentUser }: Props) {
                                       return (
                                           <div
                                               key={task.id}
-                                              onClick={e => { e.stopPropagation(); handleTaskClick(task); }}
+                                              onClick={() => handleTaskClick(task)}
                                               className={`${column.color} border border-gray-200 rounded-lg p-3 cursor-pointer hover:shadow-md transition-shadow${pendingClass(task)}`}
                                           >
                                               <div className="flex items-start gap-2 mb-2">
@@ -911,7 +933,7 @@ export default function CalendarView({ currentUser }: Props) {
 
                                               <div className="flex items-center justify-between">
                                                   <div className="text-xs text-gray-500">
-                                                      {task.estimatedHours}h
+                                                      {estimateLabel(task.estimatedHours)}
                                                   </div>
 
                                                   {assignedUser && (
@@ -929,10 +951,15 @@ export default function CalendarView({ currentUser }: Props) {
                                       );
                                   })}
 
-                                  <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-dashed border-gray-200 text-xs text-gray-400 opacity-0 group-hover:opacity-100 hover:border-blue-300 hover:text-blue-600 transition-all">
+                                  {/* Was a decorative strip under a column-wide click target.
+                                      The target is gone, so this is the button now. */}
+                                  <button
+                                      onClick={handleNewTask}
+                                      className="w-full flex items-center gap-1.5 px-3 py-2 rounded-lg border border-dashed border-gray-200 text-xs text-gray-400 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:border-blue-300 hover:text-blue-600 transition-all"
+                                  >
                                       <Plus className="w-3.5 h-3.5" />
                                       New task
-                                  </div>
+                                  </button>
                               </div>
                           </div>
                       );
