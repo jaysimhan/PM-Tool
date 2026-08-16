@@ -99,13 +99,23 @@ export default function AcceptTaskModal({ task, assignment, isOpen, onClose, onA
 
     // Reset to what is on record each time it opens, so a cancelled edit does not persist
     // into the next task somebody reviews.
+    //
+    // The task, not the assignment. The assignment carries a copy of the hours and dates taken
+    // at the moment the work was handed over, and that copy stops tracking the task the instant
+    // anyone edits the estimate afterwards -- so a task showing 4h opened a modal offering 2h,
+    // then warned that accepting 2h changed what was requested. The figure to confirm is the one
+    // on the task when Accept was clicked, whatever it has been through to get there.
     useEffect(() => {
         if (!isOpen) return;
         setDeadline(toDateInput(task.dueDate));
-        const preset = assignment.estimatedHours ?? task.estimatedHours;
+        // Zero is not an estimate somebody made, so it falls through to the assignment's copy
+        // rather than presenting itself as the figure to confirm.
+        const preset = task.estimatedHours && task.estimatedHours > 0
+            ? task.estimatedHours
+            : assignment.estimatedHours;
         setHours(preset && preset > 0 ? String(preset) : '');
-        setStartDate(toDateInput(assignment.proposedStartDate || task.proposedStartDate));
-        setEndDate(toDateInput(assignment.proposedEndDate || task.proposedEndDate));
+        setStartDate(toDateInput(task.proposedStartDate || assignment.proposedStartDate));
+        setEndDate(toDateInput(task.proposedEndDate || assignment.proposedEndDate));
     }, [isOpen, task, assignment]);
 
     // What was asked for, held separately from what is in the boxes, so the modal can say

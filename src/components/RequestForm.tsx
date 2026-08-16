@@ -60,7 +60,8 @@ function Hint({ field }: { field?: RequestFormField }) {
 }
 
 export default function RequestForm({ currentUser }: Props) {
-    const { refreshTasks, refreshClients, skills, clients, regions, allTags, refreshTags } = useData();
+    const { refreshTasks, refreshClients, skills, clients, regions, allTags, refreshTags,
+        refreshAssignments, refreshNotifications } = useData();
 
     // What the form looks like is configuration now, not a literal in this file. Every
     // label, placeholder, default and required marker below comes from here.
@@ -397,9 +398,17 @@ export default function RequestForm({ currentUser }: Props) {
                 }
             }
 
-            await refreshTasks();
-            setLastRequestRef(taskData ? `REQ-${taskData.id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : null);
+            // Assignments and notifications as well as tasks. Submitting a request is no longer
+            // the end of the story: the round robin places the work as the row lands, so by the
+            // time this returns there is an offer and a notification that did not exist when the
+            // page loaded. Refreshing tasks alone left the task showing an assignee with no
+            // assignment behind it, which is the state in which the panel cannot offer Accept --
+            // the button is drawn from the pending assignment, not from the task's status.
+            const reference = taskData ? `REQ-${taskData.id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : null;
+            await Promise.all([refreshTasks(), refreshAssignments(), refreshNotifications()]);
+            setLastRequestRef(reference);
             setShowSuccess(true);
+            toast.success(reference ? `Request ${reference} submitted.` : 'Request submitted.');
 
             // Reset form
             setFormData(blankForm());

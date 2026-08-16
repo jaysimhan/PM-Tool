@@ -1175,13 +1175,18 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
                         <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 bg-white flex-shrink-0">
                             {/* Status Dropdown */}
                             <div className="relative" ref={statusRef}>
+                                {/* The status is the assignment workflow's to set while an offer is
+                                    outstanding, so the picker closes rather than offering choices
+                                    set_task_status will refuse one by one. */}
                                 <button
                                     onClick={() => setShowStatusDropdown(v => !v)}
-                                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${getStatusBadgeColor(localStatus)} border-transparent hover:opacity-80`}
+                                    disabled={awaitingAcceptance}
+                                    title={awaitingAcceptance ? 'The assignee has to accept or reject this task before its status can change' : undefined}
+                                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${getStatusBadgeColor(localStatus)} border-transparent ${awaitingAcceptance ? 'cursor-not-allowed opacity-80' : 'hover:opacity-80'}`}
                                 >
                                     <span className={`w-2 h-2 rounded-full ${getStatusDotColor(localStatus)}`} />
                                     {currentStatusObj?.label || formatStatusLabel(localStatus) || localStatus}
-                                    <ChevronDown className="w-3.5 h-3.5 opacity-70" />
+                                    {!awaitingAcceptance && <ChevronDown className="w-3.5 h-3.5 opacity-70" />}
                                 </button>
                                 {showStatusDropdown && (
                                     <div className="absolute top-full left-0 mt-1 w-56 bg-white rounded-xl shadow-lg border border-gray-200 z-50 py-1 overflow-hidden">
@@ -1200,12 +1205,24 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
                             </div>
 
                             <div className="flex items-center gap-2">
-                                {/* Mark Complete */}
+                                {/* Mark Complete.
+                                    Disabled until somebody has taken the work on. set_task_status
+                                    refuses every status change while a task is awaiting acceptance
+                                    -- the assignee has to answer the offer first -- so an enabled
+                                    button here could only ever produce that refusal as a toast. */}
                                 <button
                                     onClick={handleMarkComplete}
-                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${isCompleted ? 'bg-green-600 border-green-600 text-white hover:bg-green-700' : 'border-gray-300 text-gray-600 bg-white hover:bg-gray-50'}`}
+                                    disabled={awaitingAcceptance}
+                                    title={awaitingAcceptance ? 'Waiting for the assignee to accept this task' : undefined}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${
+                                        awaitingAcceptance
+                                            ? 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'
+                                            : isCompleted
+                                                ? 'bg-green-600 border-green-600 text-white hover:bg-green-700'
+                                                : 'border-gray-300 text-gray-600 bg-white hover:bg-gray-50'
+                                    }`}
                                 >
-                                    <CheckCircle className={`w-4 h-4 ${isCompleted ? 'text-white' : 'text-gray-400'}`} />
+                                    <CheckCircle className={`w-4 h-4 ${awaitingAcceptance ? 'text-gray-300' : isCompleted ? 'text-white' : 'text-gray-400'}`} />
                                     {isCompleted ? 'Completed' : 'Mark Complete'}
                                 </button>
 

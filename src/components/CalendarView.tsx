@@ -1,8 +1,10 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { User, Task, TaskStatus } from '../types/types';
 import { useData } from '../contexts/DataContext';
-import { ChevronLeft, ChevronRight, ChevronDown, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
+import { supabase, inTestSandbox } from '../lib/supabaseClient';
+import toast from 'react-hot-toast';
+import { ChevronLeft, ChevronRight, ChevronDown, ChevronsLeftRight, GripVertical, Minus, Users, Filter, Download, Plus, LayoutGrid, List, ArrowUpDown, Calendar, GanttChart, User as UserIcon } from 'lucide-react';
 import { getDatesInRange, getPriorityColor, getTimelineColumns, getProjectTimelineBounds, getStatusBadgeColor, formatStatusLabel, startOfToday } from '../utils/capacityCalculations';
 import TaskDetailsPanel from './TaskDetailsPanel';
 import TimelineView from './TimelineView';
@@ -51,8 +53,97 @@ const pendingClass = (task: Task) => (isPendingAcceptance(task) ? ' task-pending
 // the list, which reads as a broken row rather than as a figure nobody has given yet.
 const estimateLabel = (hours?: number | null) => (hours === null || hours === undefined ? '—' : `${hours}h`);
 
+// ── Board columns ──────────────────────────────────────────────────────────────────────
+//
+// 'pending' is a legacy status no task carries any more, so the column it used to fill stood
+// permanently empty. 'awaiting_assignment' is what "pending" means now.
+//
+// Left to right is the order work actually travels:
+//
+//   New            a request has been made                       (insert trigger)
+//   Pending        in the pool, nobody holds it                  (assign_task with no one)
+//   Awaiting       offered to somebody, not yet answered         (assign_task / round robin)
+//   Accepted       taken on, no dates committed                  (accept_assignment)
+//   Scheduled      taken on with dates                           (accept_assignment)
+//   In Progress -> Review -> Completed
+//
+// accept_assignment sets 'scheduled' only when a start or end date was given and 'accepted'
+// otherwise, so both need a column -- without the second, accepting a task without dates
+// dropped it off the board entirely.
+//
+// `droppable` is what set_task_status will actually take. Two of these statuses belong to the
+// assignment workflow and it refuses both by name, so they are drawn but not offered as
+// targets: a drop that can only end in an error toast should not be possible to make.
+type BoardColumn = { status: TaskStatus; label: string; color: string; droppable: boolean };
+
+const BOARD_COLUMNS: BoardColumn[] = [
+    { status: 'new_request', label: 'New', color: 'bg-slate-100', droppable: true },
+    { status: 'awaiting_assignment', label: 'Pending', color: 'bg-gray-100', droppable: true },
+    { status: 'awaiting_employee_approval', label: 'Awaiting Approval', color: 'bg-yellow-100', droppable: false },
+    { status: 'accepted', label: 'Accepted', color: 'bg-teal-100', droppable: false },
+    { status: 'scheduled', label: 'Scheduled', color: 'bg-purple-100', droppable: true },
+    { status: 'in_progress', label: 'In Progress', color: 'bg-blue-100', droppable: true },
+    { status: 'manager_review_required', label: 'Review', color: 'bg-orange-100', droppable: true },
+    { status: 'completed', label: 'Completed', color: 'bg-green-100', droppable: true }
+];
+
+// A drag type of its own, so a column being moved and a task being moved cannot be mistaken
+// for one another. Both drags pass over the same drop zones, and `types` is the one part of
+// dataTransfer readable during dragover -- getData is deliberately blank until the drop.
+const COLUMN_DND_TYPE = 'application/x-pm-board-column';
+
+// How this person likes the board. Not a server preference: it is a per-device view setting
+// like the recent-search list, and nothing else needs to read it.
+const BOARD_LAYOUT_KEY = 'pm-web:board-layout';
+
+type BoardLayout = { order: TaskStatus[]; collapsed: TaskStatus[] };
+
+const readBoardLayout = (): BoardLayout => {
+    const empty: BoardLayout = { order: [], collapsed: [] };
+    if (typeof window === 'undefined') return empty;
+    try {
+        const raw = window.localStorage.getItem(BOARD_LAYOUT_KEY);
+        if (!raw) return empty;
+        const parsed = JSON.parse(raw) as Partial<BoardLayout>;
+        return {
+            order: Array.isArray(parsed.order) ? parsed.order : [],
+            collapsed: Array.isArray(parsed.collapsed) ? parsed.collapsed : []
+        };
+    } catch {
+        // A hand-edited or half-written value is not worth a broken board.
+        return empty;
+    }
+};
+
+/**
+ * The saved order, reconciled against the columns that actually exist.
+ *
+ * Statuses that have since been retired are dropped, and a column added after somebody last
+ * arranged their board appears at its default position rather than being exiled to the end --
+ * which is what makes it safe to add one without everybody losing sight of it.
+ */
+const applyColumnOrder = (order: TaskStatus[]): BoardColumn[] => {
+    const known = new Map(BOARD_COLUMNS.map(c => [c.status, c]));
+    const arranged: BoardColumn[] = [];
+    const seen = new Set<TaskStatus>();
+
+    order.forEach(status => {
+        const column = known.get(status);
+        if (column && !seen.has(status)) {
+            arranged.push(column);
+            seen.add(status);
+        }
+    });
+    BOARD_COLUMNS.forEach((column, defaultIndex) => {
+        if (!seen.has(column.status)) {
+            arranged.splice(Math.min(defaultIndex, arranged.length), 0, column);
+        }
+    });
+    return arranged;
+};
+
 export default function CalendarView({ currentUser }: Props) {
-  const { users, teams, tasks, clients, regions, allTags, skills, workCategories, loading } = useData();
+  const { users, teams, tasks, clients, regions, allTags, skills, workCategories, loading, refreshTasks } = useData();
   const [searchParams, setSearchParams] = useSearchParams();
   // Opens on today. It used to open on a fixed 28 July 2026 while the Today button beside it
   // jumped to the real date, so the month you landed on and the month that button took you to
@@ -347,13 +438,22 @@ export default function CalendarView({ currentUser }: Props) {
   };
 
   // Get tasks for a specific date
+  //
+  // Tasks with both a start and a due date span that range. Tasks that only
+  // carry a due date (which is every task fresh off the request form, since
+  // the form does not set proposedStartDate) are shown on their due date so
+  // they are not invisible on the calendar they were just created from.
   const getTasksForDate = (date: Date) => {
     const dateStr = toDateKey(date);
     return activeTasks.filter(task => {
-      if (!task.proposedStartDate || !task.dueDate) return false;
-      const startDate = taskDateKey(task.proposedStartDate);
+      if (!task.dueDate) return false;
       const endDate = taskDateKey(task.dueDate);
-      return dateStr >= startDate && dateStr <= endDate;
+      if (task.proposedStartDate) {
+        const startDate = taskDateKey(task.proposedStartDate);
+        return dateStr >= startDate && dateStr <= endDate;
+      }
+      // No start date — show on the due date itself.
+      return dateStr === endDate;
     });
   };
 
@@ -864,40 +964,375 @@ export default function CalendarView({ currentUser }: Props) {
       );
   };
 
-  const renderBoardView = () => {
-      // 'pending' is a legacy status no task carries any more, so the column it used to fill
-      // stood permanently empty. 'awaiting_assignment' is what "pending" means now.
-      //
-      // 'new_request' leads because it is where every task starts: the tasks insert trigger
-      // sets that status and will not take another value, so without a column for it a task
-      // created from this very board dropped straight off the board it was created on.
-      //
-      // The + on a column is therefore a shortcut to the request form rather than a way to
-      // file work into that column -- where a task goes next is the workflow's answer.
-      const statusColumns: { status: TaskStatus; label: string; color: string }[] = [
-          { status: 'new_request', label: 'New', color: 'bg-slate-100' },
-          { status: 'scheduled', label: 'Scheduled', color: 'bg-purple-100' },
-          { status: 'awaiting_assignment', label: 'Pending', color: 'bg-gray-100' },
-          { status: 'awaiting_employee_approval', label: 'Awaiting Approval', color: 'bg-yellow-100' },
-          { status: 'in_progress', label: 'In Progress', color: 'bg-blue-100' },
-          { status: 'manager_review_required', label: 'Review', color: 'bg-orange-100' },
-          { status: 'completed', label: 'Completed', color: 'bg-green-100' }
-      ];
+  // ── Board drag-and-drop ────────────────────────────────────────────────────
+  const [dragOverColumn, setDragOverColumn] = useState<TaskStatus | null>(null);
 
+  // ── Board layout: the order of the columns and which of them are rolled up ──
+  const [boardLayout, setBoardLayout] = useState<BoardLayout>(readBoardLayout);
+  const [draggingColumn, setDraggingColumn] = useState<TaskStatus | null>(null);
+  // Where the column would land, counted in gaps rather than in columns: 0 is before the first
+  // column, 1 is the gap after it, and so on. Highlighting the column underneath the pointer
+  // instead says "swap with this one", which is not what a drop does.
+  const [columnInsertIndex, setColumnInsertIndex] = useState<number | null>(null);
+
+  const orderedColumns = useMemo(() => applyColumnOrder(boardLayout.order), [boardLayout.order]);
+  const collapsedColumns = useMemo(() => new Set(boardLayout.collapsed), [boardLayout.collapsed]);
+
+  useEffect(() => {
+      try {
+          window.localStorage.setItem(BOARD_LAYOUT_KEY, JSON.stringify(boardLayout));
+      } catch {
+          // Private browsing, a full quota -- the board still works, it just forgets.
+      }
+  }, [boardLayout]);
+
+  const toggleColumnCollapsed = useCallback((status: TaskStatus) => {
+      setBoardLayout(prev => ({
+          ...prev,
+          collapsed: prev.collapsed.includes(status)
+              ? prev.collapsed.filter(s => s !== status)
+              : [...prev.collapsed, status]
+      }));
+  }, []);
+
+  const handleColumnDragStart = useCallback((e: React.DragEvent, status: TaskStatus) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData(COLUMN_DND_TYPE, status);
+      // Firefox will not start a drag without something on text/plain, and the task drop
+      // handler ignores anything carrying the column type, so this is safe to set.
+      e.dataTransfer.setData('text/plain', status);
+      setDraggingColumn(status);
+  }, []);
+
+  // The row the columns sit in. Measuring is done off the live DOM rather than a ref per
+  // column, which would be rebuilt on every render and every reorder.
+  const boardRowRef = useRef<HTMLDivElement | null>(null);
+
+  // ── Auto-scroll while dragging near an edge ──
+  //
+  // The board is wider than the window once there are more than a few columns, and a drag
+  // holds the pointer captive: there is no way to reach a column off the right-hand side,
+  // because scrolling to it would mean letting go. Holding the pointer near either edge
+  // scrolls the board under it instead.
+  //
+  // Speed ramps with depth into the edge zone rather than being fixed, so easing towards the
+  // edge creeps and pressing right up against it moves quickly.
+  const boardScrollRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollFrame = useRef<number | null>(null);
+  const autoScrollSpeed = useRef(0);
+
+  const stopAutoScroll = useCallback(() => {
+      if (autoScrollFrame.current !== null) {
+          cancelAnimationFrame(autoScrollFrame.current);
+          autoScrollFrame.current = null;
+      }
+      autoScrollSpeed.current = 0;
+  }, []);
+
+  const updateAutoScroll = useCallback((clientX: number) => {
+      const el = boardScrollRef.current;
+      if (!el) return;
+
+      const EDGE_ZONE = 80;   // how near the edge it starts
+      const MAX_STEP = 20;    // pixels per frame pressed right up against it
+
+      const rect = el.getBoundingClientRect();
+      let speed = 0;
+      if (clientX < rect.left + EDGE_ZONE) {
+          speed = -MAX_STEP * Math.min(1, (rect.left + EDGE_ZONE - clientX) / EDGE_ZONE);
+      } else if (clientX > rect.right - EDGE_ZONE) {
+          speed = MAX_STEP * Math.min(1, (clientX - (rect.right - EDGE_ZONE)) / EDGE_ZONE);
+      }
+      autoScrollSpeed.current = speed;
+
+      if (speed === 0) {
+          stopAutoScroll();
+          return;
+      }
+      // One loop, re-read each frame: dragover fires often enough to change the speed but not
+      // smoothly enough to scroll from, and starting a second loop would double the rate.
+      if (autoScrollFrame.current === null) {
+          const step = () => {
+              const node = boardScrollRef.current;
+              if (!node || autoScrollSpeed.current === 0) {
+                  autoScrollFrame.current = null;
+                  return;
+              }
+              node.scrollLeft += autoScrollSpeed.current;
+              autoScrollFrame.current = requestAnimationFrame(step);
+          };
+          autoScrollFrame.current = requestAnimationFrame(step);
+      }
+  }, [stopAutoScroll]);
+
+  // A drag abandoned by unmounting the view would otherwise leave the loop running.
+  useEffect(() => stopAutoScroll, [stopAutoScroll]);
+
+  /**
+   * Which gap an x coordinate is asking for: however many columns the pointer has already
+   * passed the middle of.
+   *
+   * Measured against every column at once rather than against the one being hovered. Asking
+   * the hovered column meant the 1rem gaps between columns, and the card's own padding, were
+   * dead: no dragover fired there, so the indicator only appeared when the pointer happened to
+   * be over a column, and the outermost two gaps were nearly unreachable.
+   */
+  const gapFromPointer = useCallback((clientX: number) => {
+      const row = boardRowRef.current;
+      if (!row) return 0;
+      let passed = 0;
+      row.querySelectorAll<HTMLElement>('[data-board-column]').forEach(el => {
+          const rect = el.getBoundingClientRect();
+          if (clientX > rect.left + rect.width / 2) passed += 1;
+      });
+      return passed;
+  }, []);
+
+  const handleColumnDragOver = useCallback((e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(COLUMN_DND_TYPE)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setColumnInsertIndex(gapFromPointer(e.clientX));
+  }, [gapFromPointer]);
+
+  const endColumnDrag = useCallback(() => {
+      setDraggingColumn(null);
+      setColumnInsertIndex(null);
+      stopAutoScroll();
+  }, [stopAutoScroll]);
+
+  /** Lift the dragged column out and put it back down in the gap the indicator is showing. */
+  const handleColumnDrop = useCallback((e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(COLUMN_DND_TYPE)) return;
+      e.preventDefault();
+      const dragged = e.dataTransfer.getData(COLUMN_DND_TYPE) as TaskStatus;
+      // Read off the event rather than off state, so the drop lands where the indicator is
+      // even if the last dragover has not been rendered yet.
+      const gap = gapFromPointer(e.clientX);
+      endColumnDrag();
+      if (!dragged) return;
+
+      setBoardLayout(prev => {
+          // Off the current arrangement rather than off whatever was last saved, so the first
+          // drag on a board nobody has rearranged yet starts from the default order.
+          const current = applyColumnOrder(prev.order).map(c => c.status);
+          const from = current.indexOf(dragged);
+          if (from === -1) return prev;
+          // Taking the column out shifts every gap beyond it one to the left, so a gap counted
+          // against the original row has to be adjusted before it is used as an insert point.
+          const to = from < gap ? gap - 1 : gap;
+          if (to === from) return prev;
+          const next = [...current];
+          next.splice(from, 1);
+          next.splice(to, 0, dragged);
+          return { ...prev, order: next };
+      });
+  }, [endColumnDrag, gapFromPointer]);
+
+  const handleBoardDragStart = useCallback((e: React.DragEvent, taskId: string) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', taskId);
+  }, []);
+
+  const handleBoardDragOver = useCallback((e: React.DragEvent, status: TaskStatus) => {
+      // A column being dragged across the board is not a task looking for a new status.
+      if (e.dataTransfer.types.includes(COLUMN_DND_TYPE)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverColumn(status);
+  }, []);
+
+  const handleBoardDragLeave = useCallback(() => {
+      setDragOverColumn(null);
+  }, []);
+
+  const handleBoardDrop = useCallback(async (e: React.DragEvent, newStatus: TaskStatus) => {
+      if (e.dataTransfer.types.includes(COLUMN_DND_TYPE)) return;
+      e.preventDefault();
+      setDragOverColumn(null);
+      const taskId = e.dataTransfer.getData('text/plain');
+      if (!taskId) return;
+
+      const task = filteredTasks.find(t => t.id === taskId);
+      if (!task || task.status === newStatus) return;
+
+      // A task that has been offered to somebody is theirs to answer. set_task_status refuses
+      // every change while it is outstanding, so saying why here beats letting the database
+      // say it in a language about tables and permissions.
+      if (task.status === 'awaiting_employee_approval') {
+          toast.error('The assignee has to accept or reject this task before it can be moved.');
+          return;
+      }
+
+      // Persist to supabase (unless in the test sandbox).
+      //
+      // Through set_task_status, not an UPDATE. The browser's direct write privilege on tasks
+      // was withdrawn when the task mutations were secured, and this drop handler was left
+      // behind on the old path -- so every drag ended in "permission denied for table tasks".
+      // The function is also where the workflow rules live, which is the better reason.
+      if (!inTestSandbox()) {
+          const { error } = await supabase.rpc('set_task_status', {
+              p_task_id: taskId,
+              p_status: newStatus,
+          });
+          if (error) {
+              toast.error(error.message || 'Could not update the task status.');
+              return;
+          }
+      }
+      // Refresh the task list so the UI reflects the change.
+      await refreshTasks();
+  }, [filteredTasks, refreshTasks]);
+
+  const renderBoardView = () => {
+      // The columns themselves are BOARD_COLUMNS, up at module scope with the reasoning for
+      // their order and for which of them accept a drop. What arrives here is that list
+      // rearranged the way this person left it.
+      //
+      // The + on a column is a shortcut to the request form rather than a way to file work into
+      // that column -- where a task goes next is the workflow's answer.
+      //
+      // flex-1 rather than a natural height: the card used to stop wherever the tallest column
+      // ended, leaving the page background showing beneath it and the horizontal scrollbar
+      // floating in the middle of the screen. It now fills whatever is left of the viewport, and
+      // the columns inside it stretch with it so the whole column is a drop target rather than
+      // only the part with cards in it.
       return (
-          <div className="bg-white rounded-lg border border-gray-200 p-6 overflow-x-auto">
-              <div className="flex gap-4 min-w-max">
-                  {statusColumns.map(column => {
+          <div
+              ref={boardScrollRef}
+              className="bg-white rounded-lg border border-gray-200 p-6 overflow-x-auto flex-1 min-h-0 flex flex-col"
+              // Deliberately no preventDefault: this element only watches where the pointer is
+              // so it can scroll under it. Allowing a drop here as well would mean drops landing
+              // on the card's own padding, which answers neither "which status" nor "which gap".
+              onDragOver={(e) => updateAutoScroll(e.clientX)}
+              onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node | null)) stopAutoScroll();
+              }}
+              onDrop={stopAutoScroll}
+              onDragEnd={stopAutoScroll}
+          >
+              {/* Column drags are tracked here rather than on each column: the row is continuous,
+                  so there is nowhere on the board that fails to resolve to a gap. Task drags stay
+                  on the individual columns, where the answer is which status was dropped on, and
+                  each handler ignores the other's drag by its dataTransfer type. */}
+              <div
+                  ref={boardRowRef}
+                  className="flex gap-4 min-w-max flex-1"
+                  onDragOver={handleColumnDragOver}
+                  onDrop={handleColumnDrop}
+                  onDragLeave={(e) => {
+                      // Only when the pointer has actually left the row, not on the way between
+                      // two columns inside it.
+                      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                          setColumnInsertIndex(null);
+                      }
+                  }}
+              >
+                  {orderedColumns.map((column, index) => {
                       // filteredTasks, not the live slice: the board names the status of every
                       // column it draws, so hiding finished work from it would empty the one
                       // column that exists to show it.
                       const columnTasks = filteredTasks.filter(t => t.status === column.status);
+                      const isOver = dragOverColumn === column.status;
+                      const isCollapsed = collapsedColumns.has(column.status);
+                      const isColumnDragging = draggingColumn === column.status;
+
+                      // The indicator sits in a gap, not on a column, so each column draws the
+                      // gap to its left and the last one also draws the gap past its right edge.
+                      // Absolutely positioned in the middle of the 1rem gap: a real element
+                      // between the columns would widen the row and shove everything sideways
+                      // every time the pointer crossed a boundary.
+                      //
+                      // The two gaps either side of the column being dragged are where it
+                      // already is, so they are left unmarked rather than promising a move that
+                      // would not happen.
+                      const draggedIndex = draggingColumn
+                          ? orderedColumns.findIndex(c => c.status === draggingColumn)
+                          : -1;
+                      const marks = (gap: number) =>
+                          columnInsertIndex === gap && gap !== draggedIndex && gap !== draggedIndex + 1;
+                      const gapBefore = marks(index);
+                      const gapAfter = index === orderedColumns.length - 1 && marks(index + 1);
+
+                      const insertionMarks = (
+                          <>
+                              {gapBefore && (
+                                  <span className="pointer-events-none absolute inset-y-0 -left-2 w-0.5 -translate-x-1/2 rounded-full bg-blue-500">
+                                      <span className="absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-blue-500" />
+                                  </span>
+                              )}
+                              {gapAfter && (
+                                  <span className="pointer-events-none absolute inset-y-0 -right-2 w-0.5 translate-x-1/2 rounded-full bg-blue-500">
+                                      <span className="absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-blue-500" />
+                                  </span>
+                              )}
+                          </>
+                      );
+
+                      // Rolled up: a spine holding the name and the count, and nothing else.
+                      // Still a drop target for tasks, so work can be filed into a column
+                      // somebody has tucked away without opening it first.
+                      if (isCollapsed) {
+                          return (
+                              <div
+                                  key={column.status}
+                                  data-board-column={column.status}
+                                  draggable
+                                  onDragStart={(e) => handleColumnDragStart(e, column.status)}
+                                  onDragEnd={endColumnDrag}
+                                  className={`group relative w-12 flex-shrink-0 flex flex-col items-center gap-3 rounded-lg border border-dashed border-gray-200 bg-gray-50/60 cursor-grab active:cursor-grabbing transition-opacity ${
+                                      isColumnDragging ? 'opacity-40' : ''
+                                  } ${isOver ? 'ring-2 ring-blue-200 ring-inset' : ''}`}
+                                  onDragOver={column.droppable ? (e) => handleBoardDragOver(e, column.status) : undefined}
+                                  onDragLeave={column.droppable ? handleBoardDragLeave : undefined}
+                                  onDrop={column.droppable ? (e) => void handleBoardDrop(e, column.status) : undefined}
+                              >
+                                  {insertionMarks}
+                                  <button
+                                      onClick={() => toggleColumnCollapsed(column.status)}
+                                      title={`Expand ${column.label}`}
+                                      aria-label={`Expand ${column.label}`}
+                                      className="mt-2 p-1 rounded text-gray-400 hover:bg-gray-200 hover:text-gray-700 transition-colors"
+                                  >
+                                      <ChevronsLeftRight className="w-4 h-4" />
+                                  </button>
+                                  <span className="text-xs font-medium text-gray-500 tabular-nums">{columnTasks.length}</span>
+                                  <span
+                                      className="text-sm font-semibold text-gray-700 whitespace-nowrap"
+                                      style={{ writingMode: 'vertical-rl' }}
+                                  >
+                                      {column.label}
+                                  </span>
+                              </div>
+                          );
+                      }
 
                       return (
-                          <div key={column.status} className="group space-y-3 w-72 flex-shrink-0">
-                              <div className="flex items-center justify-between">
-                                  <h3 className="text-sm font-semibold text-gray-900">{column.label}</h3>
-                                  <div className="flex items-center gap-1.5">
+                          <div
+                              key={column.status}
+                              data-board-column={column.status}
+                              className={`group relative space-y-3 w-72 flex-shrink-0 flex flex-col rounded-lg transition-opacity ${
+                                  isColumnDragging ? 'opacity-40' : ''
+                              }`}
+                              onDragOver={column.droppable ? (e) => handleBoardDragOver(e, column.status) : undefined}
+                              onDragLeave={column.droppable ? handleBoardDragLeave : undefined}
+                              onDrop={column.droppable ? (e) => void handleBoardDrop(e, column.status) : undefined}
+                          >
+                              {insertionMarks}
+                              {/* The header is the handle. Dragging a card moves one task;
+                                  dragging the header moves the whole column, and the grip
+                                  appearing on hover is what says which is which. */}
+                              <div
+                                  draggable
+                                  onDragStart={(e) => handleColumnDragStart(e, column.status)}
+                                  onDragEnd={endColumnDrag}
+                                  className="flex items-center justify-between cursor-grab active:cursor-grabbing rounded px-1 -mx-1 py-0.5 hover:bg-gray-50 transition-colors"
+                              >
+                                  <div className="flex items-center gap-1 min-w-0">
+                                      <GripVertical className="w-3.5 h-3.5 text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+                                      <h3 className="text-sm font-semibold text-gray-900 truncate">{column.label}</h3>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 flex-shrink-0">
                                       <span className="text-xs text-gray-500">{columnTasks.length}</span>
                                       <button
                                           onClick={handleNewTask}
@@ -907,10 +1342,18 @@ export default function CalendarView({ currentUser }: Props) {
                                       >
                                           <Plus className="w-4 h-4" />
                                       </button>
+                                      <button
+                                          onClick={() => toggleColumnCollapsed(column.status)}
+                                          title={`Minimise ${column.label}`}
+                                          aria-label={`Minimise ${column.label}`}
+                                          className="p-0.5 rounded text-gray-400 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-gray-100 hover:text-gray-700 transition-all"
+                                      >
+                                          <Minus className="w-4 h-4" />
+                                      </button>
                                   </div>
                               </div>
 
-                              <div className="space-y-2 min-h-[400px]">
+                              <div className={`space-y-2 flex-1 min-h-[400px] rounded-lg transition-colors ${isOver ? 'bg-blue-50 ring-2 ring-blue-200 ring-inset' : ''}`}>
                                   {columnTasks.map(task => {
                                       const assignedUser = task.assignedToId ? users.find(u => u.id === task.assignedToId) : null;
                                       const userTeam = assignedUser ? getUserTeam(assignedUser.id) : null;
@@ -918,8 +1361,10 @@ export default function CalendarView({ currentUser }: Props) {
                                       return (
                                           <div
                                               key={task.id}
+                                              draggable
+                                              onDragStart={(e) => handleBoardDragStart(e, task.id)}
                                               onClick={() => handleTaskClick(task)}
-                                              className={`${column.color} border border-gray-200 rounded-lg p-3 cursor-pointer hover:shadow-md transition-shadow${pendingClass(task)}`}
+                                              className={`${column.color} border border-gray-200 rounded-lg p-3 cursor-grab hover:shadow-md transition-shadow active:cursor-grabbing${pendingClass(task)}`}
                                           >
                                               <div className="flex items-start gap-2 mb-2">
                                                   <div
@@ -987,7 +1432,7 @@ export default function CalendarView({ currentUser }: Props) {
   if (loading) return <PageSkeleton variant="reports" />;
 
   return (
-    <div className="min-h-full font-sans" style={{ backgroundColor: '#f9fafb' }}>
+    <div className="min-h-full flex flex-col font-sans" style={{ backgroundColor: '#f9fafb' }}>
         {/* Header */}
         <div className="bg-white border-b border-gray-100">
             <div className="max-w-screen-xl mx-auto w-full px-8 pt-5 pb-3">
@@ -1248,7 +1693,11 @@ export default function CalendarView({ currentUser }: Props) {
             </div>
         )}
         
-        <div className="max-w-screen-xl mx-auto px-8 py-6 w-full space-y-6">
+        {/* flex-1 + min-h-0 carries the viewport's leftover height down to whichever view is
+            rendered. Only the board claims it (the rest keep their natural height and leave the
+            space empty, exactly as before), and without it the board's own flex-1 has nothing
+            to measure against. */}
+        <div className="max-w-screen-xl mx-auto px-8 py-6 w-full space-y-6 flex-1 min-h-0 flex flex-col">
 
       {/* Navigation and View Controls */}
       {pageMode === 'calendar' && (
