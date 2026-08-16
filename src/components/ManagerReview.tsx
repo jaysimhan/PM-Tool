@@ -24,14 +24,14 @@ export default function ManagerReview({ currentUser, hideHeader }: Props) {
     const hoursByUser = new Map<string, number>();
     tasks.forEach(t => {
       if (t.assignedToId && (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')) {
-        hoursByUser.set(t.assignedToId, (hoursByUser.get(t.assignedToId) || 0) + Math.max(0, t.estimatedHours - (t.actualHours || 0)));
+        hoursByUser.set(t.assignedToId, (hoursByUser.get(t.assignedToId) || 0) + t.estimatedHours);
       }
     });
     const overallocated = users.filter(u => (hoursByUser.get(u.id) || 0) > u.dailyCapacity * 5);
     const issues = teams.map(team => {
       const teamTasks = tasks.filter(t => t.teamIds.includes(team.id) && (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted'));
       const totalCapacity = users.filter(u => team.memberIds.includes(u.id)).reduce((sum, u) => sum + u.dailyCapacity, 0) * 5;
-      const scheduledHours = teamTasks.reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
+      const scheduledHours = teamTasks.reduce((sum, t) => sum + t.estimatedHours, 0);
       return { team, utilization: totalCapacity > 0 ? (scheduledHours / totalCapacity) * 100 : 0, hasIssue: totalCapacity > 0 && scheduledHours / totalCapacity > 0.8 };
     }).filter(t => t.hasIssue);
     return { managerReviewTasks: reviewTasks, overallocatedUsers: overallocated, teamsWithIssues: issues, activeHoursByUser: hoursByUser };
@@ -230,7 +230,7 @@ export default function ManagerReview({ currentUser, hideHeader }: Props) {
                               t.assignedToId === member.id &&
                               (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
                             );
-                            const workload = memberTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
+                            const workload = memberTasks.reduce((sum, t) => sum + t.estimatedHours, 0);
 
                             return (
                               <div
@@ -300,7 +300,7 @@ export default function ManagerReview({ currentUser, hideHeader }: Props) {
                 t.assignedToId === user.id &&
                 (t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
               );
-              const totalHours = userTasks.reduce((sum, t) => sum + (t.estimatedHours - (t.actualHours || 0)), 0);
+              const totalHours = userTasks.reduce((sum, t) => sum + t.estimatedHours, 0);
               const weekCapacity = user.dailyCapacity * 5;
               const utilization = (totalHours / weekCapacity) * 100;
 

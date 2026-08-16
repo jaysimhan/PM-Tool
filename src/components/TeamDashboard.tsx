@@ -30,12 +30,12 @@ export default function TeamDashboard({ currentUser }: Props) {
         const completedTasks = teamTasks.filter(t => t.status === 'completed');
         const unassignedTasks = teamTasks.filter(t => !t.assignedToId);
         const totalCapacity = teamMembers.reduce((sum, u) => sum + u.dailyCapacity, 0);
-        const scheduledHours = activeTasks.reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
+        const scheduledHours = activeTasks.reduce((sum, t) => sum + t.estimatedHours, 0);
         const weeklyCapacity = totalCapacity * 5;
         const utilization = weeklyCapacity > 0 ? (scheduledHours / weeklyCapacity) * 100 : 0;
         const memberWorkload = teamMembers.map(member => {
             const memberTasks = activeTasks.filter(t => t.assignedToId === member.id);
-            const hours = memberTasks.reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
+            const hours = memberTasks.reduce((sum, t) => sum + t.estimatedHours, 0);
             const capacity = member.dailyCapacity * 5;
             return { member, tasks: memberTasks, hours, capacity, utilization: capacity > 0 ? (hours / capacity) * 100 : 0 };
         }).sort((a, b) => b.utilization - a.utilization);

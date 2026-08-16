@@ -31,7 +31,7 @@ const TAG_COLORS = [
 ];
 
 
-import { getPriorityColor, getStatusBadgeColor, formatStatusLabel, getStatusDotColor } from '../utils/capacityCalculations';
+import { getPriorityColor, getStatusBadgeColor, formatStatusLabel, getStatusDotColor, spanDaysInclusive } from '../utils/capacityCalculations';
 import { DateRangePicker } from './DateRangePicker';
 import { format } from 'date-fns';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -268,12 +268,10 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
     const datePickerRef = useRef<HTMLDivElement>(null);
     const [localStartDate, setLocalStartDate] = useState('');
     const [localDueDate, setLocalDueDate] = useState('');
-    // Both are nullable in the database, and null is a state of its own -- "nobody has
-    // estimated this", "nothing has been logged against it" -- rather than a figure of zero.
-    // A request submitted without an estimate arrives here as null, and showing that as 0h
-    // would read as a decision somebody made.
+    // Nullable in the database, and null is a state of its own -- "nobody has estimated this"
+    // -- rather than a figure of zero. A request submitted without an estimate arrives here as
+    // null, and showing that as 0h would read as a decision somebody made.
     const [localEstimatedHours, setLocalEstimatedHours] = useState<number | null>(null);
-    const [localActualHours, setLocalActualHours] = useState<number | null>(null);
     const [stackedSubtask, setStackedSubtask] = useState<Task | null>(null);
     const [activeSubtasksCount, setActiveSubtasksCount] = useState(0);
     const [localChecklist, setLocalChecklist] = useState<{ id: string, text: string, completed: boolean, assigneeId?: string }[]>([]);
@@ -359,7 +357,6 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
             setLocalStartDate(task.proposedStartDate || '');
             setLocalDueDate(task.dueDate || task.proposedEndDate || '');
             setLocalEstimatedHours(task.estimatedHours ?? null);
-            setLocalActualHours(task.actualHours ?? null);
             // Display only durable task relationships; this is a read-only participant list,
             // not an implied collaborator ACL.
             const initialCollabs = users.filter(u => {
@@ -526,14 +523,29 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
     const requester = users.find(u => u.id === task.requesterId);
     const assignedByUser = task.assignedById ? users.find(u => u.id === task.assignedById) : null;
 
-    // Hours progress
+    /*
+     * What the estimate costs the person doing it.
+     *
+     * The estimate is the whole job, and a job scheduled across several days is spread evenly
+     * over them -- so the figure that matters to somebody's day is the estimate divided by the
+     * span, not the estimate itself. This is the same arithmetic the workload and capacity
+     * pages run (`spanDaysInclusive`, shared so the two cannot disagree); the panel just shows
+     * it against the one person's day rather than the whole team's.
+     *
+     * Unscheduled work has no daily cost yet. Dividing by a span that does not exist would say
+     * the whole estimate lands today, which is the opposite of true.
+     */
     const estimated = localEstimatedHours ?? 0;
-    const actual = localActualHours ?? 0;
     const hasEstimate = localEstimatedHours !== null && localEstimatedHours > 0;
-    const hoursPercent = hasEstimate ? Math.min(100, (actual / estimated) * 100) : 0;
-    // Only meaningful against a figure somebody actually set. Without one, every task with
-    // any time logged would read as over budget against an estimate of nothing.
-    const isOverBudget = hasEstimate && actual > estimated;
+    const scheduledDays = spanDaysInclusive(task.proposedStartDate, task.proposedEndDate);
+    const hoursPerDay = hasEstimate && scheduledDays !== null ? estimated / scheduledDays : null;
+    const dailyCapacity = assignedUser?.dailyCapacity ?? 0;
+    const dayPercent = hoursPerDay !== null && dailyCapacity > 0
+        ? Math.min(100, (hoursPerDay / dailyCapacity) * 100)
+        : 0;
+    // A day's work that does not fit in a day. Only answerable once somebody holds the task --
+    // there is no capacity to overrun while it is still in the pool.
+    const overloadsDay = hoursPerDay !== null && dailyCapacity > 0 && hoursPerDay > dailyCapacity;
 
     // Dependencies
     const totalDeps = localBlockedBy.length + localBlocks.length + localLinked.length;
@@ -630,24 +642,26 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
     };
 
     /**
-     * The two hours figures, once the task exists.
+     * The estimate, once the task exists.
      *
-     * The estimate could only be set twice in a task's life -- on the request form, and again
-     * by whoever accepted the work -- and nowhere in between, so a task that arrived without
-     * one, or whose scope changed after it was accepted, carried the wrong number for good.
-     * Every hours total on the workload and capacity pages is a sum of these, so a stale one
-     * is not a cosmetic problem.
+     * It could only be set twice in a task's life -- on the request form, and again by whoever
+     * accepted the work -- and nowhere in between, so a task that arrived without one, or whose
+     * scope changed after it was accepted, carried the wrong number for good. Every hours total
+     * on the workload and capacity pages is a sum of these, so a stale one is not cosmetic.
      *
-     * The actual side had it worse: the tracker has always drawn a bar of time spent against
-     * time allowed, and nothing anywhere in the application ever wrote actual_hours, so the
-     * spent half was zero on every task in the system and the bar measured nothing.
+     * There used to be a second figure beside it: hours logged, drawn as a bar of time spent
+     * against time allowed. It measured nothing -- nothing in the application ever wrote
+     * `actual_hours`, so the spent half was zero on every task in the system -- and it described
+     * a way of working this system does not have. Effort here is estimated, not clocked: the
+     * estimate is what comes out of the assignee's day, and a multi-day task spreads across the
+     * days it spans. The bar now shows that instead.
      *
-     * Both columns are ones the browser is granted directly, and RLS answers who may write
-     * them (can_edit_task: an admin, the requester, the assignee, or the team's leader), so
-     * these are plain updates rather than further workflow functions.
+     * The column is one the browser is granted directly, and RLS answers who may write it
+     * (can_edit_task: an admin, the requester, the assignee, or the team's leader), so this is a
+     * plain update rather than a further workflow function.
      */
     const saveHours = async (
-        column: 'estimated_hours' | 'actual_hours',
+        column: 'estimated_hours',
         next: number | null,
         current: number | null,
         apply: (value: number | null) => void,
@@ -655,13 +669,11 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
         apply(next);
         // The panel holds its own copy of the task -- refreshTasks() replaces the rows behind
         // it, not this object -- so the figure the rest of the panel reads is set here too.
-        if (column === 'estimated_hours') task.estimatedHours = next as Task['estimatedHours'];
-        else task.actualHours = next ?? undefined;
+        task.estimatedHours = next as Task['estimatedHours'];
 
         if (!await updateTaskFields({ [column]: next })) {
             apply(current);
-            if (column === 'estimated_hours') task.estimatedHours = current as Task['estimatedHours'];
-            else task.actualHours = current ?? undefined;
+            task.estimatedHours = current as Task['estimatedHours'];
         }
     };
 
@@ -1452,64 +1464,62 @@ function TaskDetailsPanel({ task, isOpen, onClose, currentUser, onStatusChange, 
                                     <p className="text-xs text-gray-400 mt-1">Participants derived from the requester, assignee, and responsible team.</p>
                                 </div>
 
-                                {/* ── Hours Progress Bar ── */}
+                                {/* ── Estimated effort, and what it costs a day ── */}
                                 <div className="bg-white rounded-xl border border-gray-200 p-4">
                                     <div className="flex items-center justify-between mb-2">
                                         <div className="flex items-center gap-2">
                                             <Clock className="w-4 h-4 text-gray-400" />
-                                            <span className="text-sm font-medium text-gray-700">Hours Tracker</span>
+                                            <span className="text-sm font-medium text-gray-700">Estimated effort</span>
                                         </div>
-                                        <div className="flex items-center gap-1">
-                                            <HoursField
-                                                value={localActualHours}
-                                                render={n => `${n}h`}
-                                                emptyLabel="Log time"
-                                                validate={n => (n < 0 ? 'Hours logged cannot be negative.' : null)}
-                                                title="Hours spent on this task so far"
-                                                tone={`font-semibold ${isOverBudget ? 'text-red-600' : 'text-gray-900'}`}
-                                                onSave={next => void saveHours('actual_hours', next, localActualHours, setLocalActualHours)}
-                                            />
-                                            <span className="text-sm text-gray-400">/</span>
-                                            <HoursField
-                                                value={localEstimatedHours}
-                                                render={n => `${n}h estimated`}
-                                                emptyLabel="Add an estimate"
-                                                validate={n => (n <= 0 ? 'Estimated hours must be greater than zero.' : null)}
-                                                title="Hours this task is expected to take"
-                                                tone="text-gray-400"
-                                                onSave={next => void saveHours('estimated_hours', next, localEstimatedHours, setLocalEstimatedHours)}
-                                            />
-                                        </div>
-                                    </div>
-                                    <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
-                                        <div
-                                            className={`h-full rounded-full transition-all duration-500 ${isOverBudget ? 'bg-red-500' : hoursPercent > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
-                                            style={{ width: `${hoursPercent}%` }}
+                                        <HoursField
+                                            value={localEstimatedHours}
+                                            render={n => `${n}h`}
+                                            emptyLabel="Add an estimate"
+                                            validate={n => (n <= 0 ? 'Estimated hours must be greater than zero.' : null)}
+                                            title="Hours this task is expected to take in total"
+                                            tone="font-semibold text-gray-900"
+                                            onSave={next => void saveHours('estimated_hours', next, localEstimatedHours, setLocalEstimatedHours)}
                                         />
                                     </div>
-                                    <div className="flex justify-between mt-1.5">
-                                        {/* Percentages and a remaining figure are both division by the
-                                            estimate. With none set they read as 0% used and 0.0h left,
-                                            which says the work is fully spent rather than unmeasured. */}
-                                        {!hasEstimate ? (
-                                            <span className="text-xs text-gray-400">
-                                                {actual > 0
-                                                    ? `${actual}h logged, against no estimate`
-                                                    : 'No estimate set'}
-                                            </span>
-                                        ) : (
-                                            <>
-                                                <span className="text-xs text-gray-400">{hoursPercent.toFixed(0)}% used</span>
-                                                {isOverBudget ? (
+
+                                    {/* The bar measures one day against one person's capacity, so it
+                                        needs both an estimate and the dates to spread it over. Short of
+                                        either, saying so beats a bar drawn from nothing. */}
+                                    {hoursPerDay !== null && dailyCapacity > 0 ? (
+                                        <>
+                                            <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                                                <div
+                                                    className={`h-full rounded-full transition-all duration-500 ${overloadsDay ? 'bg-red-500' : dayPercent > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
+                                                    style={{ width: `${dayPercent}%` }}
+                                                />
+                                            </div>
+                                            <div className="flex justify-between mt-1.5">
+                                                <span className="text-xs text-gray-400">
+                                                    {hoursPerDay.toFixed(1)}h/day of {dailyCapacity}h
+                                                    {scheduledDays! > 1 && ` · over ${scheduledDays} days`}
+                                                </span>
+                                                {overloadsDay ? (
                                                     <span className="text-xs text-red-500 flex items-center gap-1">
-                                                        <AlertCircle className="w-3 h-3" /> Over budget by {(actual - estimated).toFixed(1)}h
+                                                        <AlertCircle className="w-3 h-3" />
+                                                        {(hoursPerDay - dailyCapacity).toFixed(1)}h more than {assignedUser?.name.split(' ')[0] ?? 'they'} has in a day
                                                     </span>
                                                 ) : (
-                                                    <span className="text-xs text-gray-400">{(estimated - actual).toFixed(1)}h remaining</span>
+                                                    <span className="text-xs text-gray-400">
+                                                        Leaves {(dailyCapacity - hoursPerDay).toFixed(1)}h free
+                                                        {scheduledDays! > 1 ? ' a day' : ''}
+                                                    </span>
                                                 )}
-                                            </>
-                                        )}
-                                    </div>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <p className="text-xs text-gray-400">
+                                            {!hasEstimate
+                                                ? 'No estimate yet. Whoever accepts this sets it, and it comes out of their day from then on.'
+                                                : scheduledDays === null
+                                                    ? `${estimated}h in total. Give it a start and end date to see what it takes out of a day.`
+                                                    : `${estimated}h in total, not yet assigned to anyone.`}
+                                        </p>
+                                    )}
                                 </div>
 
                                 {/* ── Field Rows ── */}

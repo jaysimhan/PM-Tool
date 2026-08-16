@@ -789,9 +789,9 @@ export default function CalendarView({ currentUser }: Props) {
               
               <td
                   className="px-4 py-3 text-xs text-gray-600"
-                  title={task.estimatedHours == null ? 'No estimate set' : 'Hours logged against the estimate'}
+                  title={task.estimatedHours == null ? 'No estimate set' : 'Estimated effort, spread across the days this is scheduled for'}
               >
-                  {task.actualHours || 0} / {estimateLabel(task.estimatedHours)}
+                  {estimateLabel(task.estimatedHours)}
               </td>
           </tr>
       );
@@ -832,7 +832,7 @@ export default function CalendarView({ currentUser }: Props) {
                               <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Assignee</th>
                               <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Due date</th>
                               <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Priority</th>
-                              <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Hours</th>
+                              <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Estimate</th>
                           </tr>
                       </thead>
                       <tbody className="bg-white">

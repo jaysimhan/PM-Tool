@@ -113,7 +113,7 @@ export default function Reports({ currentUser }: Props) {
         const totalCapacity = teamMembers.reduce((sum, u) => sum + u.dailyCapacity, 0) * 5;
         const scheduledHours = teamTasks
             .filter(t => t.status === 'in_progress' || t.status === 'scheduled' || t.status === 'accepted')
-            .reduce((sum, t) => sum + Math.max(0, t.estimatedHours - (t.actualHours || 0)), 0);
+            .reduce((sum, t) => sum + t.estimatedHours, 0);
 
         return {
             team: team.name,

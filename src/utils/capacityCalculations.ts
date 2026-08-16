@@ -91,16 +91,29 @@ export function calculateDailyCapacity(
     };
 }
 
+/**
+ * How many days a scheduled task covers, counting both ends -- a task that starts and finishes
+ * on the same day is one day, not zero.
+ *
+ * Returns null when the task is not scheduled, which is a different thing from spanning no
+ * time: an estimate with no dates costs nobody a day yet, and dividing by it would say it costs
+ * them everything.
+ */
+export function spanDaysInclusive(startDate?: string | null, endDate?: string | null): number | null {
+    if (!startDate || !endDate) return null;
+
+    const start = toUtcCalendarDay(startDate);
+    const end = toUtcCalendarDay(endDate);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+    return Math.max(1, Math.round((end - start) / 86_400_000) + 1);
+}
+
 function calculateTaskHoursPerDay(task: Task): number {
-    if (!task.proposedStartDate || !task.proposedEndDate) return 0;
+    const days = spanDaysInclusive(task.proposedStartDate, task.proposedEndDate);
+    if (days === null) return 0;
 
-    const start = toUtcCalendarDay(task.proposedStartDate);
-    const end = toUtcCalendarDay(task.proposedEndDate);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
-    const daysDiff = Math.max(1, Math.round((end - start) / 86_400_000) + 1);
-
-    // Distribute hours evenly across days
-    return task.estimatedHours / daysDiff;
+    // A multi-day task is spread evenly: the estimate is the whole job, not one day of it.
+    return task.estimatedHours / days;
 }
 
 export function getDatesInRange(startDate: string, days: number): string[] {
