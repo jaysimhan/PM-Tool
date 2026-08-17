@@ -52,6 +52,48 @@ const isDeletedAccountError = (err: any) =>
     err?.code === 'user_not_found' || /sub claim|user not found/i.test(err?.message || '');
 
 /**
+ * Every way the claim can fail used to arrive on screen as "the temporary password is wrong",
+ * which is true of exactly one of them. A function that is unreachable, a new password the server
+ * rejects, an Auth update that fails after the credential was already accepted -- all of them read
+ * as the person's mistake, so they retype a credential that was right all along until five
+ * attempts lock it for fifteen minutes. Only the reason the server actually gave says the
+ * credential was bad; everything else now says what it was.
+ */
+const CLAIM_MESSAGES: Record<string, string> = {
+    invalid_or_expired_temporary_password:
+        'The email or temporary password is incorrect, expired, already used, or temporarily locked.',
+    invalid_request:
+        'Check the email address, and that your new password meets every requirement above.',
+    password_update_failed:
+        'Your temporary password was accepted, but the new password could not be saved. Try again in'
+        + ' a moment — the same temporary password still works.',
+};
+
+/**
+ * A non-2xx reply reaches the browser as an error with the response hanging off it, so the code
+ * the function sent has to be read back out of the body rather than reported as a status.
+ */
+async function describeClaimFailure(error: unknown, payload: any): Promise<string> {
+    let body = payload;
+    const response = (error as { context?: Response } | null)?.context;
+    if (response && typeof response.clone === 'function') {
+        try {
+            body = await response.clone().json();
+        } catch {
+            /* Keep whatever invoke already handed back. */
+        }
+    }
+
+    const code = body?.error as string | undefined;
+    if (code && CLAIM_MESSAGES[code]) return CLAIM_MESSAGES[code];
+    if (code) return code.replace(/_/g, ' ');
+    if (error instanceof Error) {
+        return `Could not reach the account setup service (${error.message}). Try again in a moment.`;
+    }
+    return 'Could not set your password. Try again in a moment.';
+}
+
+/**
  * Where step 1 sends an address that is not waiting to be set up, and what it says on the way.
  * Every one of these is somebody who should be on the sign-in page: either they have a password
  * already, or the thing they need is an admin rather than this screen.
@@ -257,22 +299,24 @@ export function Onboarding() {
                 // point of this step is that a password exists, and one does.
                 if (updateError && !isSamePasswordError(updateError)) throw updateError;
             } else {
-                if (!temporaryPassword) {
+                // Trimmed like the address beside it. These are copied out of a dialog and pasted
+                // through a chat window, which is where the stray space on the end comes from, and
+                // a generated credential never contains whitespace of its own to lose.
+                const credential = temporaryPassword.trim();
+                if (!credential) {
                     throw new Error('Enter the temporary password provided by your administrator.');
                 }
 
                 const { data: claim, error: claimError } = await supabase.functions.invoke('onboarding-claim', {
                     body: {
                         email: verifyEmail.trim().toLowerCase(),
-                        temporaryPassword,
+                        temporaryPassword: credential,
                         newPassword,
                         name: name.trim(),
                     },
                 });
                 if (claimError || !claim?.ok) {
-                    throw new Error(
-                        'The email or temporary password is incorrect, expired, already used, or temporarily locked.'
-                    );
+                    throw new Error(await describeClaimFailure(claimError, claim));
                 }
 
                 invitedTeamId = claim.teamId ?? null;

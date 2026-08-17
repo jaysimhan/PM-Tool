@@ -7,6 +7,28 @@ import { useNavigate } from 'react-router-dom';
 import { verifyTotpCode, redeemRecoveryCode } from '../lib/mfa';
 import toast from 'react-hot-toast';
 
+/**
+ * "Invalid login credentials" is the whole of what Auth says, and it is the same answer for a
+ * mistyped password as for the one case this form cannot serve at all: somebody holding an
+ * administrator-issued temporary password.
+ *
+ * That credential is deliberately not the account's Auth password -- admin-invite sets the Auth
+ * password to a random string nobody is ever given, and the temporary one is exchanged for a real
+ * password on /welcome instead. So signing in with it can only ever fail here, however carefully
+ * it is typed, and the generic message sends people round the same loop until the credential
+ * locks itself. Naming the way out is the difference between a dead end and a next step, and it
+ * reveals nothing about whether the address exists.
+ */
+const describeSignInError = (err: any): string => {
+    const message = err?.message || 'Could not sign in.';
+    if (err?.code === 'invalid_credentials' || /invalid login credentials/i.test(message)) {
+        return 'That email and password combination is not right. A temporary password from your'
+            + ' administrator is not used here — choose "Set up your account" below to exchange it'
+            + ' for a password of your own.';
+    }
+    return message;
+};
+
 export function Login() {
   const { session, mfaRequired, checkMfa, signOut } = useAuth();
   const navigate = useNavigate();
@@ -63,9 +85,9 @@ export function Login() {
         if (error) throw error;
         
         await checkMfa();
-        
+
     } catch (err: any) {
-        setError(err.message);
+        setError(describeSignInError(err));
     } finally {
         setLoading(false);
     }
@@ -509,7 +531,26 @@ export function Login() {
               </form>
           )}
 
-          <p className="text-center text-[12px] text-gray-500 mt-6">
+          {/* The only door to /welcome, and the reason this link has to exist: the temporary
+              password an admin hands out is not an Auth password, so the form above rejects it
+              every time. Nothing else in the app points at the page where it does work -- the
+              redirect in ProtectedRoute only fires for a session, and an invitee cannot get one
+              -- so without this the credential is unusable unless somebody is told the URL by
+              hand. Hidden mid-2FA, where whoever is looking is already half signed in. */}
+          {!mfaRequired && (
+            <p className="text-center text-[12px] text-gray-500 mt-6">
+              Have a temporary password?{" "}
+              <button
+                type="button"
+                onClick={() => navigate('/welcome')}
+                className="font-medium transition-colors hover:underline"
+                style={{ color: "#3a74df" }}
+              >
+                Set up your account
+              </button>
+            </p>
+          )}
+          <p className={`text-center text-[12px] text-gray-500 ${mfaRequired ? 'mt-6' : 'mt-2'}`}>
             Don't have an account?{" "}
             <button
               type="button"

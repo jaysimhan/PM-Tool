@@ -21,6 +21,24 @@ interface GeneratedCredential {
     expiresAt: string;
 }
 
+/**
+ * Where a temporary password is redeemed. The sign-in form refuses it on purpose -- admin-invite
+ * leaves the Auth password set to a string nobody is given -- so a credential passed on without
+ * this address cannot be used at all, however correctly it was typed.
+ */
+const setupPageUrl = `${window.location.origin}/welcome`;
+
+/** The whole of what an admin needs to send, so the link cannot be the part left behind. */
+const setupMessage = (credential: GeneratedCredential) => [
+    `Your WorkFlow Pro account is ready. Set your password here: ${setupPageUrl}`,
+    '',
+    `Email: ${credential.email}`,
+    `Temporary password: ${credential.temporaryPassword}`,
+    '',
+    `This temporary password works once and expires ${new Date(credential.expiresAt).toLocaleString()}.`,
+    'It is not your sign-in password -- the setup page swaps it for one you choose.',
+].join('\n');
+
 export default React.memo(TeamManagement);
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[a-zA-Z]{2,}$/;
@@ -2110,6 +2128,14 @@ function TeamManagement({ currentUser }: Props) {
                                 <p className="text-sm text-gray-600 mt-1">
                                     Copy these now. They expire after three days and cannot be viewed again.
                                 </p>
+                                {/* Said here because this is the panel an admin actually copies from,
+                                    and a temporary password sent without it does not work: the sign-in
+                                    form rejects it by design. "Copy message" is the button to reach
+                                    for -- it sends the link and the credential together. */}
+                                <p className="text-sm text-gray-600 mt-2">
+                                    These are not sign-in passwords. Each person enters theirs on the
+                                    setup page, which is where it becomes a password of their own.
+                                </p>
                             </div>
                             <button
                                 type="button"
@@ -2119,6 +2145,25 @@ function TeamManagement({ currentUser }: Props) {
                             >
                                 <X className="w-5 h-5" />
                             </button>
+                        </div>
+
+                        <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-3">
+                            <div className="text-xs font-medium text-blue-900">Setup page</div>
+                            <div className="flex items-center gap-2 mt-1.5">
+                                <code className="flex-1 px-3 py-2 bg-white border border-blue-200 rounded-lg text-sm break-all select-all text-blue-900">
+                                    {setupPageUrl}
+                                </code>
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        await navigator.clipboard.writeText(setupPageUrl);
+                                        toast.success('Setup page link copied.');
+                                    }}
+                                    className="px-3 py-2 border border-blue-300 rounded-lg text-sm font-medium text-blue-800 hover:bg-blue-100 flex items-center gap-2"
+                                >
+                                    <Copy className="w-4 h-4" /> Copy
+                                </button>
+                            </div>
                         </div>
 
                         <div className="space-y-3">
@@ -2138,6 +2183,16 @@ function TeamManagement({ currentUser }: Props) {
                                             className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 flex items-center gap-2"
                                         >
                                             <Copy className="w-4 h-4" /> Copy
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={async () => {
+                                                await navigator.clipboard.writeText(setupMessage(credential));
+                                                toast.success(`Setup message copied for ${credential.email}.`);
+                                            }}
+                                            className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 flex items-center gap-2 whitespace-nowrap"
+                                        >
+                                            <Mail className="w-4 h-4" /> Copy message
                                         </button>
                                     </div>
                                     <p className="text-xs text-gray-500 mt-2">

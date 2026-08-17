@@ -35,7 +35,12 @@ Deno.serve(async (req) => {
     }
 
     const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-    const temporaryPassword = typeof body.temporaryPassword === 'string' ? body.temporaryPassword : '';
+    // Trimmed like the email. The credential is copied out of a dialog and relayed through a chat
+    // client, so it arrives with a trailing space often enough to matter, and a generated one holds
+    // no whitespace of its own for this to eat. Trimmed here rather than only in the browser so it
+    // is true of every caller, and before the hash comparison so the restore below re-issues the
+    // same string the database just checked.
+    const temporaryPassword = typeof body.temporaryPassword === 'string' ? body.temporaryPassword.trim() : '';
     const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
     const name = typeof body.name === 'string' ? body.name.trim().slice(0, 120) : '';
 
